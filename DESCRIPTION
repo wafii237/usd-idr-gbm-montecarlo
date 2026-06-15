@@ -1,0 +1,40 @@
+Package: USDIDRProjection
+Title: Proyeksi Nilai Tukar USD/IDR dengan Geometric Brownian Motion dan Simulasi Monte Carlo
+Version: 1.0.0
+Authors@R:
+    person(
+      given  = "Muhammad Faeruz Wafi",
+      family = "Abidin",
+      email  = "your.email@students.unnes.ac.id",
+      role   = c("aut", "cre"),
+      comment = c(ORCID = "")
+    )
+Description:
+    Proyek analisis stokastik yang menerapkan model Geometric Brownian Motion
+    (GBM) untuk memodelkan dinamika nilai tukar USD/IDR harian periode
+    2021–2025, dilanjutkan dengan Simulasi Monte Carlo untuk menghasilkan
+    proyeksi dalam tiga skenario (bearish, base, bullish) beserta interval
+    kepercayaan 90%. Analisis mencakup pipeline lengkap: data wrangling,
+    statistik deskriptif, uji normalitas log-return, estimasi parameter GBM,
+    simulasi, dan visualisasi hasil berupa fan chart interaktif.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Language: id
+Date: 2025-12-31
+Depends:
+    R (>= 4.0.0)
+Imports:
+    dplyr,
+    lubridate,
+    zoo,
+    moments,
+    tseries,
+    ggplot2,
+    knitr,
+    kableExtra,
+    shiny
+Suggests:
+    rmarkdown
+URL: https://github.com/[username]/usd-idr-gbm-montecarlo
+BugReports: https://github.com/[username]/usd-idr-gbm-montecarlo/issues
+RoxygenNote: 7.0.0
