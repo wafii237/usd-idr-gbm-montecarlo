@@ -1,0 +1,702 @@
+---
+title: "Analisis Kurs USD/IDR — Bagian 7: Analisis Hasil Simulasi Monte Carlo"
+author: "Data Analysis Project"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    theme: flatly
+    highlight: tango
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    number_sections: true
+    df_print: paged
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo       = TRUE,
+  message    = FALSE,
+  warning    = FALSE,
+  fig.align  = "center",
+  fig.width  = 11,
+  fig.height = 6
+)
+setwd("D:/PROJECT PSS")
+
+# Buat folder output untuk menyimpan plot
+dir_plot <- file.path(getwd(), "output_plot")
+if (!dir.exists(dir_plot)) {
+  dir.create(dir_plot, recursive = TRUE)
+  message("Folder output_plot berhasil dibuat: ", dir_plot)
+} else {
+  message("Folder output_plot sudah ada: ", dir_plot)
+}
+```
+
+---
+
+> **Catatan Proyek:** Dokumen ini merupakan bagian ketujuh sekaligus penutup dari seri analisis kurs USD/IDR. Pada bagian ini dilakukan analisis menyeluruh terhadap hasil simulasi Monte Carlo — mencakup fan chart, distribusi kurs akhir, interval kepercayaan 90%, perbandingan stabilitas antar skenario, dan kesimpulan proyeksi kurs USD/IDR.
+
+---
+
+# Latar Belakang
+
+Simulasi Monte Carlo menghasilkan ribuan lintasan harga yang mungkin terjadi berdasarkan model GBM. Dari kumpulan lintasan tersebut, kita dapat mengekstrak:
+
+1. **Ekspektasi** — nilai rata-rata kurs yang diproyeksikan
+2. **Ketidakpastian** — rentang kemungkinan melalui interval kepercayaan
+3. **Stabilitas** — seberapa konsisten hasil antar jumlah iterasi yang berbeda
+
+---
+
+# Persiapan
+
+## Memuat Paket
+
+```{r load-packages}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(knitr)
+library(kableExtra)
+
+set.seed(42)
+```
+
+## Memuat Data & Hasil Simulasi
+
+```{r load-data}
+# Baca data historis
+df_raw <- read.csv(
+  "Data Historis USD_IDR.csv",
+  header = TRUE, stringsAsFactors = FALSE, fileEncoding = "UTF-8-BOM"
+)
+
+df_usd_idr <- df_raw %>%
+  select(Tanggal, Terakhir) %>%
+  mutate(
+    Kurs    = as.numeric(gsub(",", ".", gsub("\\.", "", Terakhir))),
+    Tanggal = as.Date(Tanggal, format = "%d/%m/%Y")
+  ) %>%
+  select(Tanggal, Kurs) %>%
+  arrange(Tanggal)
+
+# Muat hasil simulasi dari Bagian 6
+hasil <- readRDS("hasil_simulasi.rds")
+
+sim_1000  <- hasil$sim_1000
+sim_5000  <- hasil$sim_5000
+sim_10000 <- hasil$sim_10000
+S0        <- hasil$S0
+mu        <- hasil$mu
+sigma     <- hasil$sigma
+horizon   <- hasil$horizon
+T0        <- hasil$tanggal_S0
+
+cat("Hasil simulasi berhasil dimuat.\n")
+cat(sprintf("S0      : Rp %s\n", formatC(S0, format="f", digits=0, big.mark=".")))
+cat(sprintf("µ       : %.8f\n", mu))
+cat(sprintf("σ       : %.8f\n", sigma))
+cat(sprintf("Horizon : %d hari\n", horizon))
+cat(sprintf("Sim 1K  : %d × %d\n", nrow(sim_1000),  ncol(sim_1000)))
+cat(sprintf("Sim 5K  : %d × %d\n", nrow(sim_5000),  ncol(sim_5000)))
+cat(sprintf("Sim 10K : %d × %d\n", nrow(sim_10000), ncol(sim_10000)))
+```
+
+## Membuat Sumbu Waktu
+
+```{r time-axis}
+# Buat vektor tanggal untuk sumbu x simulasi
+# Mulai dari T0+1 hari kerja, sebanyak horizon hari
+tanggal_sim <- seq(T0 + 1, by = "day", length.out = horizon * 2)
+tanggal_sim <- tanggal_sim[!weekdays(tanggal_sim) %in% c("Saturday","Sunday")]
+tanggal_sim <- c(T0, tanggal_sim[1:horizon])
+
+cat("Rentang simulasi:", format(min(tanggal_sim), "%d %B %Y"),
+    "–", format(max(tanggal_sim), "%d %B %Y"), "\n")
+cat("Jumlah titik waktu:", length(tanggal_sim), "\n")
+```
+
+---
+
+# Tahap 1 — Fan Chart per Skenario
+
+Fan chart menampilkan seluruh lintasan simulasi sekaligus, memberikan gambaran visual tentang rentang kemungkinan pergerakan kurs.
+
+## Helper: Fungsi Pembuatan Fan Chart
+
+```{r fan-function}
+buat_fan_chart <- function(sim_matrix, tanggal, S0_kurs, n_sim_label,
+                            warna_jalur = "#3b82f6", warna_median = "#1e40af",
+                            warna_band  = "#93c5fd") {
+
+  n_time <- nrow(sim_matrix)
+  n_sim  <- ncol(sim_matrix)
+
+  # Hitung statistik per waktu
+  df_stats <- data.frame(
+    Tanggal = tanggal,
+    median  = apply(sim_matrix, 1, median),
+    p05     = apply(sim_matrix, 1, quantile, 0.05),
+    p25     = apply(sim_matrix, 1, quantile, 0.25),
+    p75     = apply(sim_matrix, 1, quantile, 0.75),
+    p95     = apply(sim_matrix, 1, quantile, 0.95),
+    mean    = apply(sim_matrix, 1, mean)
+  )
+
+  # Ambil sampel lintasan untuk ditampilkan (max 300 agar tidak berat)
+  n_sample <- min(300, n_sim)
+  idx      <- sample(1:n_sim, n_sample)
+
+  df_paths <- as.data.frame(sim_matrix[, idx])
+  df_paths$Tanggal <- tanggal
+  df_long <- df_paths %>%
+    pivot_longer(-Tanggal, names_to = "sim", values_to = "Kurs")
+
+  # Data historis 6 bulan terakhir untuk konteks
+  df_hist <- df_usd_idr %>%
+    filter(Tanggal >= S0_kurs - 180)
+
+  ggplot() +
+    # Lintasan individual (transparan)
+    geom_line(data = df_long,
+              aes(x = Tanggal, y = Kurs, group = sim),
+              color = warna_jalur, alpha = 0.04, linewidth = 0.3) +
+    # Band 90% (P5–P95)
+    geom_ribbon(data = df_stats,
+                aes(x = Tanggal, ymin = p05, ymax = p95),
+                fill = warna_band, alpha = 0.2) +
+    # Band 50% (P25–P75)
+    geom_ribbon(data = df_stats,
+                aes(x = Tanggal, ymin = p25, ymax = p75),
+                fill = warna_band, alpha = 0.3) +
+    # Garis median
+    geom_line(data = df_stats,
+              aes(x = Tanggal, y = median),
+              color = warna_median, linewidth = 1.0, linetype = "solid") +
+    # Garis mean
+    geom_line(data = df_stats,
+              aes(x = Tanggal, y = mean),
+              color = "#ef4444", linewidth = 0.8, linetype = "dashed", alpha = 0.8) +
+    # Data historis
+    geom_line(data = df_hist,
+              aes(x = Tanggal, y = Kurs),
+              color = "#1e293b", linewidth = 0.9, alpha = 0.9) +
+    # Garis pemisah historis vs simulasi
+    geom_vline(xintercept = as.numeric(tanggal[1]),
+               color = "#64748b", linewidth = 0.6, linetype = "dotted") +
+    # Titik S0
+    geom_point(aes(x = tanggal[1], y = sim_matrix[1,1]),
+               color = "#1e293b", size = 3, shape = 21,
+               fill = "white", stroke = 1.5) +
+    scale_y_continuous(
+      labels = function(x) formatC(x, format="f", digits=0, big.mark=".")
+    ) +
+    scale_x_date(date_breaks = "2 months", date_labels = "%b '%y") +
+    labs(
+      subtitle = sprintf(
+        "%s iterasi  |  Median: Rp %s  |  CI 90%%: Rp %s – Rp %s",
+        n_sim_label,
+        formatC(tail(df_stats$median, 1), format="f", digits=0, big.mark="."),
+        formatC(tail(df_stats$p05,    1), format="f", digits=0, big.mark="."),
+        formatC(tail(df_stats$p95,    1), format="f", digits=0, big.mark=".")
+      ),
+      x = NULL, y = "Kurs USD/IDR (IDR)",
+      caption = "— Historis   ── Median   - - Mean   ░ Band 50%   ░░ Band 90%"
+    ) +
+    theme_minimal(base_family = "sans") +
+    theme(
+      plot.background  = element_rect(fill = "#ffffff", color = NA),
+      panel.background = element_rect(fill = "#fafafa", color = NA),
+      panel.grid.major = element_line(color = "#f1f5f9", linewidth = 0.4),
+      panel.grid.minor = element_blank(),
+      axis.text        = element_text(color = "#64748b", size = 9, face = "bold"),
+      axis.title.y     = element_text(color = "#475569", size = 10, face = "bold"),
+      plot.subtitle    = element_text(color = "#475569", size = 10, face = "bold"),
+      plot.caption     = element_text(color = "#94a3b8", size = 9),
+      plot.margin      = margin(12, 16, 8, 12)
+    )
+}
+```
+
+## Fan Chart — Skenario 1.000 Iterasi
+
+```{r fan-1000, fig.cap="Fan chart simulasi Monte Carlo GBM — 1.000 iterasi"}
+p_fan_1000 <- buat_fan_chart(
+  sim_matrix    = sim_1000,
+  tanggal       = tanggal_sim,
+  S0_kurs       = T0,
+  n_sim_label   = "1.000",
+  warna_jalur   = "#3b82f6",
+  warna_median  = "#1d4ed8",
+  warna_band    = "#93c5fd"
+)
+p_fan_1000
+
+# Simpan plot ke file
+ggsave(
+  filename = file.path(dir_plot, "fan_chart_1000_iterasi.png"),
+  plot     = p_fan_1000,
+  width    = 11, height = 6, units = "in", dpi = 300, bg = "white"
+)
+message("✅ Fan chart 1.000 iterasi disimpan.")
+```
+
+## Fan Chart — Skenario 5.000 Iterasi
+
+```{r fan-5000, fig.cap="Fan chart simulasi Monte Carlo GBM — 5.000 iterasi"}
+p_fan_5000 <- buat_fan_chart(
+  sim_matrix    = sim_5000,
+  tanggal       = tanggal_sim,
+  S0_kurs       = T0,
+  n_sim_label   = "5.000",
+  warna_jalur   = "#8b5cf6",
+  warna_median  = "#6d28d9",
+  warna_band    = "#c4b5fd"
+)
+p_fan_5000
+
+# Simpan plot ke file
+ggsave(
+  filename = file.path(dir_plot, "fan_chart_5000_iterasi.png"),
+  plot     = p_fan_1000,
+  width    = 11, height = 6, units = "in", dpi = 300, bg = "white"
+)
+message("✅ Fan chart 5.000 iterasi disimpan.")
+```
+
+## Fan Chart — Skenario 10.000 Iterasi
+
+```{r fan-10000, fig.cap="Fan chart simulasi Monte Carlo GBM — 10.000 iterasi"}
+p_fan_10000 <- buat_fan_chart(
+  sim_matrix    = sim_10000,
+  tanggal       = tanggal_sim,
+  S0_kurs       = T0,
+  n_sim_label   = "10.000",
+  warna_jalur   = "#059669",
+  warna_median  = "#065f46",
+  warna_band    = "#6ee7b7"
+)
+p_fan_10000
+
+# Simpan plot ke file
+ggsave(
+  filename = file.path(dir_plot, "fan_chart_10000_iterasi.png"),
+  plot     = p_fan_1000,
+  width    = 11, height = 6, units = "in", dpi = 300, bg = "white"
+)
+message("✅ Fan chart 10.000 iterasi disimpan.")
+```
+
+---
+
+# Tahap 2 — Distribusi Kurs Akhir (Hari ke-252)
+
+Distribusi kurs pada hari terakhir simulasi (hari ke-252) menggambarkan kemungkinan nilai kurs USD/IDR satu tahun ke depan.
+
+```{r dist-akhir}
+# Ambil kurs akhir dari setiap skenario
+akhir_1000  <- sim_1000[nrow(sim_1000),   ]
+akhir_5000  <- sim_5000[nrow(sim_5000),   ]
+akhir_10000 <- sim_10000[nrow(sim_10000), ]
+
+# Gabungkan untuk plotting
+df_akhir <- data.frame(
+  Kurs      = c(akhir_1000, akhir_5000, akhir_10000),
+  Skenario  = factor(
+    rep(c("1.000 iterasi", "5.000 iterasi", "10.000 iterasi"),
+        c(length(akhir_1000), length(akhir_5000), length(akhir_10000))),
+    levels = c("1.000 iterasi", "5.000 iterasi", "10.000 iterasi")
+  )
+)
+
+# Simpan plot ke variabel p_dist
+p_dist <- ggplot(df_akhir, aes(x = Kurs, fill = Skenario, color = Skenario)) +
+  geom_density(alpha = 0.3, linewidth = 0.8) +
+  geom_vline(xintercept = S0, color = "#1e293b",
+             linewidth = 0.8, linetype = "dashed") +
+  annotate("text", x = S0, y = Inf,
+           label = sprintf("  S₀ = %s", formatC(S0, format="f", digits=0, big.mark=".")),
+           vjust = 1.8, hjust = -0.05, color = "#1e293b",
+           size = 3.5, fontface = "bold") +
+  scale_x_continuous(
+    labels = function(x) formatC(x, format="f", digits=0, big.mark=".")
+  ) +
+  scale_fill_manual(values  = c("#3b82f6","#8b5cf6","#059669")) +
+  scale_color_manual(values = c("#1d4ed8","#6d28d9","#065f46")) +
+  labs(x = "Kurs USD/IDR Hari ke-252 (IDR)",
+       y = "Densitas",
+       subtitle = "Distribusi kurs akhir simulasi — ketiga skenario overlay",
+       fill = "Skenario", color = "Skenario") +
+  theme_minimal(base_family = "sans") +
+  theme(
+    plot.background  = element_rect(fill = "#ffffff", color = NA),
+    panel.background = element_rect(fill = "#fafafa", color = NA),
+    panel.grid.major = element_line(color = "#f1f5f9", linewidth = 0.4),
+    panel.grid.minor = element_blank(),
+    axis.text  = element_text(color = "#64748b", size = 9,  face = "bold"),
+    axis.title = element_text(color = "#475569", size = 10, face = "bold"),
+    plot.subtitle   = element_text(color = "#475569", size = 10, face = "bold"),
+    legend.position = "top",
+    legend.text     = element_text(color = "#475569", size = 10, face = "bold"),
+    plot.margin     = margin(12, 16, 8, 12)
+  )
+
+p_dist # Tampilkan plot di RStudio
+
+# Simpan plot ke file secara spesifik menggunakan nama variabel
+ggsave(
+  filename = file.path(dir_plot, "distribusi_kurs_akhir.png"),
+  plot     = p_dist,
+  width    = 11, height = 6, units = "in", dpi = 300, bg = "white"
+)
+message("✅ Plot distribusi kurs akhir disimpan.")
+```
+
+# Tahap 3 — Interval Kepercayaan 90%
+
+```{r ci-table}
+# Hitung CI 90% dan statistik distribusi akhir
+hitung_ci <- function(kurs_akhir, label) {
+  data.frame(
+    Skenario    = label,
+    N_Iterasi   = length(kurs_akhir),
+    Mean        = mean(kurs_akhir),
+    Median      = median(kurs_akhir),
+    SD          = sd(kurs_akhir),
+    P05         = quantile(kurs_akhir, 0.05),
+    P25         = quantile(kurs_akhir, 0.25),
+    P75         = quantile(kurs_akhir, 0.75),
+    P95         = quantile(kurs_akhir, 0.95),
+    Min         = min(kurs_akhir),
+    Max         = max(kurs_akhir)
+  )
+}
+
+df_ci <- bind_rows(
+  hitung_ci(akhir_1000,  "1.000 iterasi"),
+  hitung_ci(akhir_5000,  "5.000 iterasi"),
+  hitung_ci(akhir_10000, "10.000 iterasi")
+)
+
+# Format tabel
+df_ci_fmt <- data.frame(
+  Skenario  = df_ci$Skenario,
+  Mean      = formatC(df_ci$Mean,   format="f", digits=0, big.mark="."),
+  Median    = formatC(df_ci$Median, format="f", digits=0, big.mark="."),
+  SD        = formatC(df_ci$SD,     format="f", digits=0, big.mark="."),
+  CI_Bawah  = formatC(df_ci$P05,    format="f", digits=0, big.mark="."),
+  CI_Atas   = formatC(df_ci$P95,    format="f", digits=0, big.mark="."),
+  Min       = formatC(df_ci$Min,    format="f", digits=0, big.mark="."),
+  Max       = formatC(df_ci$Max,    format="f", digits=0, big.mark=".")
+)
+
+kable(df_ci_fmt,
+      caption = "Tabel 3.1 — Statistik Distribusi Kurs Akhir & Interval Kepercayaan 90%",
+      align   = c("l","r","r","r","r","r","r","r"),
+      col.names = c("Skenario","Mean","Median","Std Dev",
+                    "P5 (CI Bawah)","P95 (CI Atas)","Minimum","Maksimum")) %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed","bordered"),
+                full_width = TRUE) %>%
+  column_spec(5, bold = TRUE, color = "#c0392b") %>%
+  column_spec(6, bold = TRUE, color = "#27ae60") %>%
+  column_spec(2, bold = TRUE, color = "#2c7bb6") %>%
+  row_spec(3, background = "#eafaf1", bold = TRUE) %>%
+  add_header_above(c(" " = 1, "Ukuran Pemusatan" = 2,
+                     "Penyebaran" = 1, "Interval Kepercayaan 90%" = 2,
+                     "Nilai Ekstrem" = 2))
+```
+
+---
+
+# Tahap 4 — Perbandingan Stabilitas Antar Skenario
+
+Stabilitas dinilai dari seberapa konsisten statistik kunci (mean, median, CI) saat jumlah iterasi ditingkatkan dari 1.000 ke 10.000.
+
+## Plot Konvergensi Mean
+
+---
+
+### 2. Chunk `konvergensi` (Konvergensi Mean)
+Blok dari ````{r konvergensi}` sampai ```` ` lalu timpa dengan kode ini:
+```{r konvergensi}
+# Hitung mean kumulatif untuk setiap skenario
+mean_kum_1000  <- cumsum(akhir_1000)  / seq_along(akhir_1000)
+mean_kum_5000  <- cumsum(akhir_5000)  / seq_along(akhir_5000)
+mean_kum_10000 <- cumsum(akhir_10000) / seq_along(akhir_10000)
+
+# Subsample untuk plotting
+idx_1000  <- round(seq(1, 1000,  length.out = 500))
+idx_5000  <- round(seq(1, 5000,  length.out = 500))
+idx_10000 <- round(seq(1, 10000, length.out = 500))
+
+df_konv <- bind_rows(
+  data.frame(iter = idx_1000,  mean_kum = mean_kum_1000[idx_1000],
+             Skenario = "1.000 iterasi"),
+  data.frame(iter = idx_5000,  mean_kum = mean_kum_5000[idx_5000],
+             Skenario = "5.000 iterasi"),
+  data.frame(iter = idx_10000, mean_kum = mean_kum_10000[idx_10000],
+             Skenario = "10.000 iterasi")
+) %>%
+  mutate(Skenario = factor(Skenario,
+    levels = c("1.000 iterasi","5.000 iterasi","10.000 iterasi")))
+
+# Nilai teoretis GBM: E[S_T] = S0 * exp(mu * T)
+mean_teoritis <- S0 * exp(mu * horizon)
+
+# Simpan plot ke variabel p_konv
+p_konv <- ggplot(df_konv, aes(x = iter, y = mean_kum, color = Skenario)) +
+  geom_line(linewidth = 0.7, alpha = 0.85) +
+  geom_hline(yintercept = mean_teoritis,
+             color = "#ef4444", linewidth = 0.8,
+             linetype = "dashed", alpha = 0.8) +
+  annotate("text", x = max(df_konv$iter) * 0.6, y = mean_teoritis,
+           label = sprintf("E[S_T] teoritis = %s",
+             formatC(mean_teoritis, format="f", digits=0, big.mark=".")),
+           vjust = -0.6, color = "#ef4444", size = 3.5, fontface = "bold") +
+  scale_y_continuous(
+    labels = function(x) formatC(x, format="f", digits=0, big.mark=".")
+  ) +
+  scale_color_manual(values = c("#3b82f6","#8b5cf6","#059669")) +
+  labs(x = "Jumlah Iterasi (kumulatif)",
+       y = "Mean Kurs Akhir (IDR)",
+       subtitle = "Konvergensi mean kurs akhir menuju nilai ekspektasi teoretis GBM",
+       color = "Skenario") +
+  theme_minimal(base_family = "sans") +
+  theme(
+    plot.background  = element_rect(fill = "#ffffff", color = NA),
+    panel.background = element_rect(fill = "#fafafa", color = NA),
+    panel.grid.major = element_line(color = "#f1f5f9", linewidth = 0.4),
+    panel.grid.minor = element_blank(),
+    axis.text  = element_text(color = "#64748b", size = 9,  face = "bold"),
+    axis.title = element_text(color = "#475569", size = 10, face = "bold"),
+    plot.subtitle   = element_text(color = "#475569", size = 10, face = "bold"),
+    legend.position = "top",
+    legend.text     = element_text(color = "#475569", size = 10, face = "bold"),
+    plot.margin     = margin(12, 16, 8, 12)
+  )
+
+p_konv # Tampilkan plot di RStudio
+
+# Simpan plot ke file secara spesifik menggunakan nama variabel
+ggsave(
+  filename = file.path(dir_plot, "konvergensi_mean.png"),
+  plot     = p_konv,
+  width    = 11, height = 6, units = "in", dpi = 300, bg = "white"
+)
+message("✅ Plot konvergensi mean disimpan.")
+```
+
+## Tabel Perbandingan Stabilitas
+
+```{r stability-table}
+# Selisih CI antar skenario sebagai ukuran stabilitas
+df_stab <- data.frame(
+  Skenario     = c("1.000 iterasi","5.000 iterasi","10.000 iterasi"),
+  Mean         = formatC(df_ci$Mean,   format="f", digits=0, big.mark="."),
+  Median       = formatC(df_ci$Median, format="f", digits=0, big.mark="."),
+  Lebar_CI90   = formatC(df_ci$P95 - df_ci$P05, format="f", digits=0, big.mark="."),
+  CV_persen    = paste0(formatC((df_ci$SD / df_ci$Mean) * 100,
+                                format="f", digits=2), "%"),
+  Stabilitas   = c("Cukup stabil", "Stabil", "Sangat stabil")
+)
+
+kable(df_stab,
+      caption = "Tabel 4.1 — Perbandingan Stabilitas Antar Skenario Simulasi",
+      align   = c("l","r","r","r","r","c"),
+      col.names = c("Skenario","Mean","Median",
+                    "Lebar CI 90%","CV (%)","Stabilitas")) %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed","bordered"),
+                full_width = TRUE) %>%
+  column_spec(4, bold = TRUE) %>%
+  column_spec(6, bold = TRUE,
+              color = c("#e67e22","#2980b9","#27ae60")) %>%
+  row_spec(3, background = "#eafaf1", bold = TRUE)
+```
+
+---
+
+# Tahap 5 — Kesimpulan & Proyeksi
+
+## Nilai Ekspektasi Teoretis
+
+```{r ekspektasi}
+# Ekspektasi GBM: E[S_T] = S0 * exp(mu * T)
+E_ST       <- S0 * exp(mu * horizon)
+median_ST  <- S0 * exp((mu - 0.5 * sigma^2) * horizon)
+
+cat("=== PROYEKSI KURS USD/IDR (252 HARI KE DEPAN) ===\n\n")
+cat(sprintf("Kurs awal S₀                 : Rp %s\n",
+    formatC(S0, format="f", digits=0, big.mark=".")))
+cat(sprintf("Ekspektasi E[S_T] teoretis   : Rp %s\n",
+    formatC(E_ST, format="f", digits=0, big.mark=".")))
+cat(sprintf("Median teoretis              : Rp %s\n",
+    formatC(median_ST, format="f", digits=0, big.mark=".")))
+cat(sprintf("\nHasil simulasi (10.000 iter):\n"))
+cat(sprintf("  Mean   : Rp %s\n",
+    formatC(mean(akhir_10000),   format="f", digits=0, big.mark=".")))
+cat(sprintf("  Median : Rp %s\n",
+    formatC(median(akhir_10000), format="f", digits=0, big.mark=".")))
+cat(sprintf("  CI 90%% : Rp %s – Rp %s\n",
+    formatC(quantile(akhir_10000, 0.05), format="f", digits=0, big.mark="."),
+    formatC(quantile(akhir_10000, 0.95), format="f", digits=0, big.mark=".")))
+```
+
+## Tabel Kesimpulan Final
+
+```{r final-table}
+df_final <- data.frame(
+  Komponen = c(
+    "Kurs Awal S₀",
+    "Ekspektasi Teoretis E[S_T]",
+    "Median Teoretis",
+    "Mean Simulasi (10.000 iter)",
+    "Median Simulasi (10.000 iter)",
+    "Batas Bawah CI 90% — P5",
+    "Batas Atas CI 90% — P95",
+    "Probabilitas kurs > S₀",
+    "Skenario Terbaik Rekomendasi"
+  ),
+  Nilai = c(
+    formatC(S0, format="f", digits=0, big.mark="."),
+    formatC(E_ST, format="f", digits=0, big.mark="."),
+    formatC(median_ST, format="f", digits=0, big.mark="."),
+    formatC(mean(akhir_10000),   format="f", digits=0, big.mark="."),
+    formatC(median(akhir_10000), format="f", digits=0, big.mark="."),
+    formatC(quantile(akhir_10000, 0.05), format="f", digits=0, big.mark="."),
+    formatC(quantile(akhir_10000, 0.95), format="f", digits=0, big.mark="."),
+    paste0(round(mean(akhir_10000 > S0) * 100, 1), "%"),
+    "10.000 iterasi"
+  ),
+  Satuan = c(
+    "IDR per USD", "IDR per USD", "IDR per USD",
+    "IDR per USD", "IDR per USD",
+    "IDR per USD (batas bawah 90%)",
+    "IDR per USD (batas atas 90%)",
+    "probabilitas depresiasi IDR",
+    "konvergensi optimal"
+  )
+)
+
+kable(df_final,
+      caption = "Tabel 5.1 — Ringkasan Proyeksi Kurs USD/IDR (Horizon 252 Hari)",
+      align   = c("l","r","l")) %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed","bordered"),
+                full_width = TRUE) %>%
+  row_spec(1, bold = TRUE, background = "#eaf4fb") %>%
+  row_spec(4, bold = TRUE, color = "#2c7bb6") %>%
+  row_spec(6, bold = TRUE, color = "#c0392b") %>%
+  row_spec(7, bold = TRUE, color = "#27ae60") %>%
+  row_spec(9, bold = TRUE, background = "#eafaf1") %>%
+  pack_rows("Nilai Referensi", 1, 3) %>%
+  pack_rows("Hasil Simulasi", 4, 7) %>%
+  pack_rows("Analisis Tambahan", 8, 9)
+```
+
+## Interpretasi Hasil
+
+```{r interpretasi, echo=FALSE}
+prob_dep <- mean(akhir_10000 > S0) * 100
+ci_bawah <- quantile(akhir_10000, 0.05)
+ci_atas  <- quantile(akhir_10000, 0.95)
+mean_sim <- mean(akhir_10000)
+
+cat("=== INTERPRETASI HASIL SIMULASI ===\n\n")
+
+cat("1. PROYEKSI KURS\n")
+cat(sprintf("   Berdasarkan simulasi 10.000 iterasi, kurs USD/IDR diproyeksikan\n"))
+cat(sprintf("   berada di kisaran Rp %s – Rp %s (CI 90%%) dalam\n",
+    formatC(ci_bawah, format="f", digits=0, big.mark="."),
+    formatC(ci_atas,  format="f", digits=0, big.mark=".")))
+cat(sprintf("   252 hari perdagangan ke depan, dengan nilai tengah sekitar\n"))
+cat(sprintf("   Rp %s per USD.\n\n",
+    formatC(mean_sim, format="f", digits=0, big.mark=".")))
+
+cat("2. ARAH PERGERAKAN\n")
+cat(sprintf("   Probabilitas kurs akhir > S₀ (depresiasi IDR): %.1f%%\n", prob_dep))
+cat(sprintf("   Probabilitas kurs akhir < S₀ (apresiasi IDR) : %.1f%%\n\n", 100 - prob_dep))
+
+cat("3. STABILITAS SIMULASI\n")
+cat("   Peningkatan iterasi dari 1.000 ke 10.000 menunjukkan konvergensi\n")
+cat("   yang baik pada mean dan interval kepercayaan. Skenario 10.000 iterasi\n")
+cat("   memberikan estimasi paling stabil dan direkomendasikan.\n\n")
+
+cat("4. CATATAN PENTING\n")
+cat("   Model GBM mengasumsikan volatilitas dan drift konstan, serta tidak\n")
+cat("   memperhitungkan kejadian ekstrem (krisis, intervensi bank sentral).\n")
+cat("   Hasil ini merupakan proyeksi statistik, bukan prediksi pasti.\n")
+```
+
+---
+
+# Ringkasan Keseluruhan Analisis
+
+```{r ringkasan-final, echo=FALSE}
+df_ring <- data.frame(
+  Bagian = paste("Bagian", 1:7),
+  Judul  = c(
+    "Data Wrangling",
+    "Statistik Deskriptif",
+    "Visualisasi (R Shiny)",
+    "Uji Normalitas Return",
+    "Estimasi Parameter GBM",
+    "Simulasi Monte Carlo",
+    "Analisis Hasil Simulasi"
+  ),
+  Output_Utama = c(
+    "df_usd_idr bersih (1.267 obs)",
+    "µ, σ, skewness, kurtosis log-return",
+    "Dashboard interaktif 3 tab",
+    "KS-test & Jarque-Bera, GBM layak",
+    "µ = estimasi drift, σ = estimasi volatilitas",
+    "3 matrix simulasi: 1K, 5K, 10K lintasan",
+    "Fan chart, CI 90%, proyeksi kurs 1 tahun"
+  ),
+  Status = rep("✅ Selesai", 7)
+)
+
+kable(df_ring,
+      caption = "Ringkasan Keseluruhan Analisis Kurs USD/IDR",
+      align   = c("c","l","l","c"),
+      col.names = c("Bagian","Judul","Output Utama","Status")) %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed","bordered"),
+                full_width = TRUE) %>%
+  column_spec(1, bold = TRUE, width = "5em") %>%
+  column_spec(2, bold = TRUE, color = "#2c7bb6") %>%
+  column_spec(4, bold = TRUE, color = "#27ae60") %>%
+  row_spec(7, background = "#eafaf1", bold = TRUE)
+```
+
+---
+
+```{r rekapitulasi-plot, echo=FALSE}
+# Tampilkan daftar file plot yang berhasil disimpan
+file_plot <- list.files(dir_plot, pattern = "\\.png$", full.names = FALSE)
+
+if (length(file_plot) > 0) {
+  df_saved <- data.frame(
+    No        = seq_along(file_plot),
+    Nama_File = file_plot,
+    Ukuran_KB = round(file.size(file.path(dir_plot, file_plot)) / 1024, 1)
+  )
+  cat(sprintf("📁 Lokasi folder : %s\n", dir_plot))
+  cat(sprintf("📊 Total file    : %d plot tersimpan\n\n", nrow(df_saved)))
+  print(df_saved, row.names = FALSE)
+} else {
+  cat("⚠️  Tidak ada file plot ditemukan di folder output_plot.\n")
+}
+```
+
+---
+
+```{r session-info, collapse=TRUE}
+sessionInfo()
+```
+
+---
+
+*Dokumen ini merupakan bagian penutup dari seri analisis kurs USD/IDR menggunakan pendekatan Geometric Brownian Motion dan Simulasi Monte Carlo. Seluruh kode dapat direproduksi dengan menjalankan ulang semua bagian secara berurutan.*

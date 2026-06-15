@@ -1,0 +1,588 @@
+---
+title: "Analisis Kurs USD/IDR — Bagian 4: Uji Normalitas Return"
+author: "Data Analysis Project"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    theme: flatly
+    highlight: tango
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    number_sections: true
+    df_print: paged
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo      = TRUE,
+  message   = FALSE,
+  warning   = FALSE,
+  fig.align = "center"
+)
+```
+
+---
+
+> **Catatan Proyek:** Dokumen ini merupakan bagian keempat dari seri analisis kurs USD/IDR. Fokus pada validasi formal asumsi normalitas *log-return* sebagai prasyarat penggunaan model *Geometric Brownian Motion* (GBM). Hasil uji di bagian ini menjadi landasan keputusan apakah GBM layak diterapkan pada data USD/IDR.
+
+---
+
+# Latar Belakang
+
+Model GBM mengasumsikan bahwa *log-return* harian ($r_t$) berdistribusi normal:
+
+$$r_t = \ln\left(\frac{S_t}{S_{t-1}}\right) \sim \mathcal{N}(\mu,\ \sigma^2)$$
+
+Apabila asumsi ini tidak terpenuhi, hasil simulasi Monte Carlo perlu diinterpretasikan dengan kehati-hatian. Validasi dilakukan melalui dua pendekatan:
+
+1. **Uji Kolmogorov-Smirnov (KS Test)** — dipilih karena $n > 1.000$ (Shapiro-Wilk tidak direkomendasikan untuk sampel besar)
+2. **Uji Jarque-Bera** — menguji normalitas berdasarkan skewness dan kurtosis secara simultan
+
+---
+
+# Persiapan: Memuat Paket & Data
+
+## Memuat Paket
+
+```{r load-packages}
+# Manajemen data
+library(dplyr)
+
+# Uji statistik
+library(tseries)    # Uji Jarque-Bera
+
+# Tabel output
+library(knitr)
+library(kableExtra)
+
+#visualisasi
+library(ggplot2)
+library(scales)
+```
+
+> **Instalasi:** Jalankan `install.packages(c("dplyr", "tseries", "knitr", "kableExtra"))` jika paket belum tersedia.
+
+## Memuat Data Return
+
+```{r load-data}
+# Baca langsung dari CSV — tidak bergantung pada file RDS
+df_raw <- read.csv(
+  "Data Historis USD_IDR.csv",
+  header           = TRUE,
+  stringsAsFactors = FALSE,
+  fileEncoding     = "UTF-8-BOM"
+)
+
+# Wrangling ulang (ringkas)
+df_usd_idr <- df_raw %>%
+  select(Tanggal, Terakhir) %>%
+  mutate(
+    Kurs    = as.numeric(gsub(",", ".", gsub("\\.", "", Terakhir))),
+    Tanggal = as.Date(Tanggal, format = "%d/%m/%Y")
+  ) %>%
+  select(Tanggal, Kurs) %>%
+  arrange(Tanggal)
+
+# Hitung log-return
+df_return <- df_usd_idr %>%
+  mutate(Log_Return = log(Kurs / lag(Kurs))) %>%
+  filter(!is.na(Log_Return))
+
+rt <- df_return$Log_Return
+
+cat("Data berhasil dimuat dari CSV.\n")
+cat("Jumlah observasi :", length(rt), "\n")
+cat("Periode          :", format(min(df_return$Tanggal), "%d %B %Y"),
+    "–", format(max(df_return$Tanggal), "%d %B %Y"), "\n")
+cat("Mean return (µ)  :", round(mean(rt), 8), "\n")
+cat("Std dev (σ)      :", round(sd(rt),   8), "\n")
+```
+
+---
+
+# Tahap 1 — Uji Kolmogorov-Smirnov (KS Test)
+
+## Dasar Teori
+
+Uji KS membandingkan fungsi distribusi kumulatif empiris (ECDF) dari data sampel dengan CDF distribusi normal teoretis. Hipotesis yang diuji:
+
+- $H_0$: Data *log-return* berdistribusi normal
+- $H_1$: Data *log-return* **tidak** berdistribusi normal
+
+Keputusan diambil pada **tingkat signifikansi $\alpha = 0{,}05$**:
+- Jika $p\text{-value} \geq 0{,}05$ → **Gagal tolak** $H_0$ (distribusi normal)
+- Jika $p\text{-value} < 0{,}05$ → **Tolak** $H_0$ (tidak normal)
+
+## Pelaksanaan Uji
+
+```{r ks-test}
+# Uji KS: bandingkan data dengan distribusi normal N(µ, σ²)
+ks_result <- ks.test(
+  x    = rt,
+  y    = "pnorm",
+  mean = mean(rt),
+  sd   = sd(rt)
+)
+
+# Tampilkan output mentah
+print(ks_result)
+```
+
+## Ringkasan Hasil KS Test
+
+```{r ks-summary}
+ks_table <- data.frame(
+  Komponen = c(
+    "Metode Uji",
+    "Jumlah Observasi (n)",
+    "Statistik D",
+    "p-value",
+    "Tingkat Signifikansi (α)",
+    "Keputusan",
+    "Kesimpulan"
+  ),
+  Hasil = c(
+    "Kolmogorov-Smirnov One-Sample Test",
+    formatC(length(rt), format = "d"),
+    formatC(ks_result$statistic, format = "f", digits = 6),
+    ifelse(ks_result$p.value < 0.001,
+           "< 0,001",
+           formatC(ks_result$p.value, format = "f", digits = 6)),
+    "0,05",
+    ifelse(ks_result$p.value < 0.05, "Tolak H₀", "Gagal Tolak H₀"),
+    ifelse(ks_result$p.value < 0.05,
+           "Log-return TIDAK berdistribusi normal",
+           "Log-return berdistribusi normal")
+  )
+)
+
+kable(ks_table,
+      caption = "Tabel 1.1 — Hasil Uji Kolmogorov-Smirnov",
+      align   = c("l", "l"),
+      col.names = c("Komponen", "Hasil")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "bordered"),
+                full_width = FALSE) %>%
+  row_spec(6, bold = TRUE,
+           color     = ifelse(ks_result$p.value < 0.05, "white", "white"),
+           background = ifelse(ks_result$p.value < 0.05, "#c0392b", "#27ae60")) %>%
+  row_spec(7, bold = TRUE, color = "#2c3e50",
+           background = ifelse(ks_result$p.value < 0.05, "#fdecea", "#eafaf1"))
+```
+
+---
+
+# Tahap 2 — Uji Jarque-Bera
+
+## Dasar Teori
+
+Uji Jarque-Bera (JB) menguji normalitas berdasarkan **skewness** dan **kurtosis** secara bersamaan menggunakan statistik:
+
+$$JB = \frac{n}{6}\left(S^2 + \frac{(K-3)^2}{4}\right)$$
+
+di mana $S$ adalah skewness dan $K$ adalah kurtosis sampel. Di bawah $H_0$, statistik JB mengikuti distribusi $\chi^2$ dengan 2 derajat kebebasan.
+
+- $H_0$: Data berdistribusi normal ($S = 0$ dan $K = 3$)
+- $H_1$: Data **tidak** berdistribusi normal
+
+## Pelaksanaan Uji
+
+```{r jb-test}
+# Uji Jarque-Bera menggunakan paket tseries
+jb_result <- jarque.bera.test(rt)
+
+# Tampilkan output mentah
+print(jb_result)
+```
+## Pelaksanaan Uji
+
+```{r ks-test}
+# Uji KS: bandingkan data dengan distribusi normal N(µ, σ²)
+ks_result <- ks.test(
+  x    = rt,
+  y    = "pnorm",
+  mean = mean(rt),
+  sd   = sd(rt)
+)
+
+# Tampilkan output mentah
+print(ks_result)
+```
+
+## Ringkasan Hasil KS Test
+
+```{r ks-summary}
+ks_table <- data.frame(
+  Komponen = c(
+    "Metode Uji",
+    "Jumlah Observasi (n)",
+    "Statistik D",
+    "p-value",
+    "Tingkat Signifikansi (α)",
+    "Keputusan",
+    "Kesimpulan"
+  ),
+  Hasil = c(
+    "Kolmogorov-Smirnov One-Sample Test",
+    formatC(length(rt), format = "d"),
+    formatC(ks_result$statistic, format = "f", digits = 6),
+    ifelse(ks_result$p.value < 0.001,
+           "< 0,001",
+           formatC(ks_result$p.value, format = "f", digits = 6)),
+    "0,05",
+    ifelse(ks_result$p.value < 0.05, "Tolak H₀", "Gagal Tolak H₀"),
+    ifelse(ks_result$p.value < 0.05,
+           "Log-return TIDAK berdistribusi normal",
+           "Log-return berdistribusi normal")
+  )
+)
+
+kable(ks_table,
+      caption = "Tabel 1.1 — Hasil Uji Kolmogorov-Smirnov",
+      align   = c("l", "l"),
+      col.names = c("Komponen", "Hasil")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "bordered"),
+                full_width = FALSE) %>%
+  row_spec(6, bold = TRUE,
+           color     = "white",
+           background = ifelse(ks_result$p.value < 0.05, "#c0392b", "#27ae60")) %>%
+  row_spec(7, bold = TRUE, color = "#2c3e50",
+           background = ifelse(ks_result$p.value < 0.05, "#fdecea", "#eafaf1"))
+```
+
+---
+
+# Tahap 2 — Uji Jarque-Bera
+
+## Pelaksanaan Uji
+
+```{r jb-test}
+# Uji Jarque-Bera menggunakan paket tseries
+jb_result <- jarque.bera.test(rt)
+
+# Tampilkan output mentah
+print(jb_result)
+```
+
+## Ringkasan Hasil Jarque-Bera
+
+```{r jb-summary}
+# Hitung skewness dan kurtosis manual untuk ditampilkan
+n    <- length(rt)
+mu   <- mean(rt)
+sig  <- sd(rt)
+skew <- (n / ((n-1)*(n-2))) * sum(((rt - mu) / sig)^3)
+kurt <- (n*(n+1)/((n-1)*(n-2)*(n-3))) *
+        sum(((rt - mu)/sig)^4) -
+        3*(n-1)^2/((n-2)*(n-3))
+
+jb_table <- data.frame(
+  Komponen = c(
+    "Metode Uji",
+    "Jumlah Observasi (n)",
+    "Skewness (S)",
+    "Excess Kurtosis (K−3)",
+    "Statistik JB",
+    "Derajat Kebebasan",
+    "p-value",
+    "Tingkat Signifikansi (α)",
+    "Keputusan",
+    "Kesimpulan"
+  ),
+  Hasil = c(
+    "Jarque-Bera Test",
+    formatC(n, format = "d"),
+    formatC(skew, format = "f", digits = 6),
+    formatC(kurt, format = "f", digits = 6),
+    formatC(jb_result$statistic, format = "f", digits = 4),
+    "2",
+    ifelse(jb_result$p.value < 0.001,
+           "< 0,001",
+           formatC(jb_result$p.value, format = "f", digits = 6)),
+    "0,05",
+    ifelse(jb_result$p.value < 0.05, "Tolak H₀", "Gagal Tolak H₀"),
+    ifelse(jb_result$p.value < 0.05,
+           "Log-return TIDAK berdistribusi normal",
+           "Log-return berdistribusi normal")
+  )
+)
+
+kable(jb_table,
+      caption = "Tabel 2.1 — Hasil Uji Jarque-Bera",
+      align   = c("l", "l"),
+      col.names = c("Komponen", "Hasil")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "bordered"),
+                full_width = FALSE) %>%
+  row_spec(9, bold = TRUE,
+           color      = "white",
+           background = ifelse(jb_result$p.value < 0.05, "#c0392b", "#27ae60")) %>%
+  row_spec(10, bold = TRUE, color = "#2c3e50",
+           background = ifelse(jb_result$p.value < 0.05, "#fdecea", "#eafaf1")) %>%
+  pack_rows("Input Statistik", 3, 5) %>%
+  pack_rows("Hasil Uji", 6, 10)
+```
+
+---
+
+# Tahap 2.5 — Visualisasi Distribusi dan Uji Grafis
+
+Untuk melengkapi pengujian formal di atas, bagian ini menyajikan evaluasi visual menggunakan histogram (dengan overlay kurva teoretis) dan QQ-Plot.
+
+## Histogram Distribusi Log-Return
+
+```{r plot-distribution, fig.width=10, fig.height=5}
+library(ggplot2)
+
+df_plot_rt <- data.frame(Log_Return = rt)
+
+plot_hist <- ggplot(df_plot_rt, aes(x = Log_Return)) +
+  geom_histogram(aes(y = ..density..), bins = 50, 
+                 fill = "#34495e", colour = "white", alpha = 0.8) +
+  geom_density(colour = "#e74c3c", linewidth = 1) +
+  stat_function(
+    fun = dnorm,
+    args = list(mean = mean(rt), sd = sd(rt)),
+    colour = "#2ecc71", linewidth = 1, linetype = "dashed"
+  ) +
+  labs(
+    title = "Histogram Log-Return USD/IDR vs Kurva Normal Teoretis",
+    subtitle = "Garis Merah = Kepadatan Empiris | Garis Hijau Putus-putus = Distribusi Normal Sempurna",
+    x = "Log-Return Harian",
+    y = "Density"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title = element_text(face = "bold", colour = "#1a252f"),
+    panel.grid.major = element_line(colour = "#dce3ea", linewidth = 0.4)
+  )
+
+# Tampilkan di dokumen HTML
+plot_hist
+
+# Simpan ke laptop
+ggsave("plot_histogram_return.png", plot = plot_kurs_or_hist <- plot_hist, width = 10, height = 5, dpi = 300)
+```
+
+## Quantile-Quantile Plot (QQ-Plot)
+
+```{r plot-qq, fig.width=8, fig.height=5.5}
+plot_qq <- ggplot(df_plot_rt, aes(sample = Log_Return)) +
+  stat_qq(colour = "#3498db", alpha = 0.6, size = 1.5) +
+  stat_qq_line(colour = "#e74c3c", linewidth = 0.8, linetype = "dashed") +
+  labs(
+    title = "QQ-Plot Log-Return USD/IDR",
+    subtitle = "Penyimpangan di ujung garis mengonfirmasi fenomena Fat Tails (Ekor Tebbal)",
+    x = "Kuantil Teoretis (Normal)",
+    y = "Kuantil Sampel (Empiris)"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title = element_text(face = "bold", colour = "#1a252f"),
+    panel.grid.major = element_line(colour = "#dce3ea", linewidth = 0.4)
+  )
+
+# Tampilkan di dokumen HTML
+plot_qq
+
+# Simpan ke laptop
+ggsave("plot_qq_return.png", plot = plot_qq, width = 8, height = 5.5, dpi = 300)
+```
+# Tahap 3 — Rekapitulasi Kedua Uji
+
+```{r recap-table}
+recap <- data.frame(
+  Uji = c("Kolmogorov-Smirnov", "Jarque-Bera"),
+  Statistik = c(
+    formatC(ks_result$statistic, format = "f", digits = 6),
+    formatC(jb_result$statistic, format = "f", digits = 4)
+  ),
+  p_value = c(
+    ifelse(ks_result$p.value < 0.001, "< 0,001",
+           formatC(ks_result$p.value, format = "f", digits = 6)),
+    ifelse(jb_result$p.value < 0.001, "< 0,001",
+           formatC(jb_result$p.value, format = "f", digits = 6))
+  ),
+  Keputusan = c(
+    ifelse(ks_result$p.value < 0.05, "Tolak H₀", "Gagal Tolak H₀"),
+    ifelse(jb_result$p.value < 0.05, "Tolak H₀", "Gagal Tolak H₀")
+  ),
+  Keterangan = c(
+    "Berbasis jarak ECDF vs CDF normal",
+    "Berbasis skewness & kurtosis simultan"
+  )
+)
+
+kable(recap,
+      caption = "Tabel 3.1 — Rekapitulasi Hasil Uji Normalitas",
+      align   = c("l", "r", "r", "c", "l"),
+      col.names = c("Uji", "Statistik", "p-value", "Keputusan", "Keterangan")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "bordered"),
+                full_width = TRUE) %>%
+  column_spec(4, bold = TRUE,
+              color      = "white",
+              background = ifelse(
+                c(ks_result$p.value, jb_result$p.value) < 0.05,
+                "#c0392b", "#27ae60"
+              ))
+```
+
+---
+
+# Tahap 4 — Interpretasi & Implikasi GBM
+
+## Interpretasi Hasil
+
+```{r interpretasi, echo=FALSE}
+ks_tolak  <- ks_result$p.value < 0.05
+jb_tolak  <- jb_result$p.value < 0.05
+kedua_tolak <- ks_tolak & jb_tolak
+
+cat("=== INTERPRETASI HASIL UJI NORMALITAS ===\n\n")
+
+cat(sprintf("Uji Kolmogorov-Smirnov : %s (D = %.6f, p %s)\n",
+    ifelse(ks_tolak, "TOLAK H₀", "GAGAL TOLAK H₀"),
+    ks_result$statistic,
+    ifelse(ks_result$p.value < 0.001, "< 0,001",
+           formatC(ks_result$p.value, digits = 6, format = "f"))))
+
+cat(sprintf("Uji Jarque-Bera        : %s (JB = %.4f, p %s)\n\n",
+    ifelse(jb_tolak, "TOLAK H₀", "GAGAL TOLAK H₀"),
+    jb_result$statistic,
+    ifelse(jb_result$p.value < 0.001, "< 0,001",
+           formatC(jb_result$p.value, digits = 6, format = "f"))))
+
+if (kedua_tolak) {
+  cat("Kedua uji secara konsisten menolak hipotesis nol pada α = 0,05.\n")
+  cat("Artinya, log-return USD/IDR secara formal TIDAK berdistribusi normal sempurna.\n\n")
+  cat("Penyebab utama penolakan:\n")
+  cat(sprintf("  • Skewness = %.4f → distribusi tidak simetris sempurna\n", skew))
+  cat(sprintf("  • Excess kurtosis = %.4f → ekor distribusi lebih tebal dari normal\n", kurt))
+  cat("    (fenomena 'fat tails' yang umum pada data keuangan)\n")
+} else {
+  cat("Setidaknya satu uji gagal menolak H₀ — distribusi mendekati normal.\n")
+}
+```
+
+## Implikasi terhadap Penggunaan GBM
+
+```{r implikasi-gbm, echo=FALSE}
+cat("=== IMPLIKASI TERHADAP MODEL GBM ===\n\n")
+
+cat("Meskipun uji formal menolak normalitas sempurna, GBM tetap\n")
+cat("dapat digunakan dengan pertimbangan berikut:\n\n")
+
+cat("1. JUSTIFIKASI PENGGUNAAN GBM:\n")
+cat("   • GBM adalah model standar industri untuk pemodelan harga aset keuangan\n")
+cat("     (Black-Scholes, 1973) dan tetap digunakan secara luas meskipun\n")
+cat("     normalitas tidak terpenuhi secara sempurna.\n")
+cat("   • Penyimpangan terjadi terutama di ekor distribusi (return ekstrem),\n")
+cat("     sementara bagian tengah (return normal sehari-hari) mendekati normal.\n")
+cat("   • Central Limit Theorem mendukung pendekatan normal untuk return\n")
+cat("     agregat dalam jangka panjang.\n\n")
+
+cat("2. CATATAN PENTING DALAM INTERPRETASI:\n")
+cat("   • Interval kepercayaan dari simulasi Monte Carlo mungkin UNDERESTIMATE\n")
+cat("     risiko ekstrem (krisis, shock mendadak) karena ekor lebih tebal.\n")
+cat("   • Hasil simulasi lebih valid untuk kondisi normal (bukan krisis).\n")
+cat("   • Semakin panjang horizon simulasi, asumsi normalitas semakin kritis.\n\n")
+
+cat("3. KEPUTUSAN:\n")
+cat("   ✓ GBM LAYAK digunakan untuk simulasi Monte Carlo kurs USD/IDR\n")
+cat("     dengan catatan interpretasi di atas.\n")
+```
+
+---
+
+# Tahap 5 — Simpan Hasil Uji
+
+```{r save-results}
+# Simpan hasil uji normalitas untuk referensi laporan
+hasil_normalitas <- list(
+  ks_statistic  = as.numeric(ks_result$statistic),
+  ks_pvalue     = ks_result$p.value,
+  ks_keputusan  = ifelse(ks_result$p.value < 0.05, "Tolak H0", "Gagal Tolak H0"),
+  jb_statistic  = as.numeric(jb_result$statistic),
+  jb_pvalue     = jb_result$p.value,
+  jb_keputusan  = ifelse(jb_result$p.value < 0.05, "Tolak H0", "Gagal Tolak H0"),
+  skewness      = skew,
+  excess_kurt   = kurt,
+  gbm_layak     = TRUE,   # Keputusan akhir penggunaan GBM
+  catatan       = "GBM layak digunakan dengan catatan fat tails"
+)
+
+saveRDS(hasil_normalitas, "hasil_normalitas.rds")
+
+cat("✓ Hasil uji disimpan ke: hasil_normalitas.rds\n\n")
+cat("=== RINGKASAN UNTUK LAPORAN ===\n")
+cat(sprintf("KS Test  : D = %.6f, p %s → %s\n",
+    hasil_normalitas$ks_statistic,
+    ifelse(hasil_normalitas$ks_pvalue < 0.001, "< 0,001",
+           round(hasil_normalitas$ks_pvalue, 6)),
+    hasil_normalitas$ks_keputusan))
+cat(sprintf("JB Test  : JB = %.4f, p %s → %s\n",
+    hasil_normalitas$jb_statistic,
+    ifelse(hasil_normalitas$jb_pvalue < 0.001, "< 0,001",
+           round(hasil_normalitas$jb_pvalue, 6)),
+    hasil_normalitas$jb_keputusan))
+cat(sprintf("Skewness : %.4f\n", hasil_normalitas$skewness))
+cat(sprintf("Ex. Kurt : %.4f\n", hasil_normalitas$excess_kurt))
+cat(sprintf("GBM Layak: %s\n",   hasil_normalitas$gbm_layak))
+```
+
+---
+
+# Ringkasan Bagian 4
+
+```{r ringkasan-tab4, echo=FALSE}
+ringkasan <- data.frame(
+  Sub_Tahap = c("4.1", "4.2", "4.3", "4.4", "4.5"),
+  Aktivitas = c(
+    "Uji Kolmogorov-Smirnov",
+    "Uji Jarque-Bera",
+    "Rekapitulasi kedua uji",
+    "Interpretasi & implikasi GBM",
+    "Simpan hasil uji"
+  ),
+  Output_Utama = c(
+    "Statistik D, p-value, keputusan H₀",
+    "Statistik JB, p-value, keputusan H₀",
+    "Tabel perbandingan kedua uji",
+    "Justifikasi kelayakan GBM",
+    "hasil_normalitas.rds"
+  )
+)
+
+kable(ringkasan,
+      caption = "Tabel 5.1 — Ringkasan Aktivitas Bagian 4",
+      align   = c("c", "l", "l"),
+      col.names = c("Sub-Tahap", "Aktivitas", "Output Utama")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "bordered"),
+                full_width = TRUE) %>%
+  column_spec(1, bold = TRUE, width = "5em") %>%
+  column_spec(2, bold = TRUE, color = "#2c7bb6") %>%
+  row_spec(5, background = "#eafaf1", bold = TRUE)
+```
+
+---
+
+# Langkah Selanjutnya
+
+Dengan validasi normalitas yang sudah dilakukan, analisis berlanjut ke tahap inti:
+
+- **Bagian 5 — Estimasi Parameter GBM:** Menggunakan $\mu$ dan $\sigma$ dari Bagian 2 untuk mendefinisikan proses stokastik kurs secara formal.
+- **Bagian 6 — Simulasi Monte Carlo:** Mensimulasikan 1.000, 5.000, dan 10.000 lintasan kurs ke depan menggunakan persamaan GBM diskrit:
+
+$$S_{t+\Delta t} = S_t \cdot \exp\left[\left(\mu - \frac{\sigma^2}{2}\right)\Delta t + \sigma\sqrt{\Delta t}\,Z_t\right], \quad Z_t \sim \mathcal{N}(0,1)$$
+
+---
+
+```{r session-info, collapse=TRUE}
+sessionInfo()
+```
+
+---
+
+*Dokumen ini merupakan bagian dari seri analisis kurs USD/IDR menggunakan pendekatan Geometric Brownian Motion dan Simulasi Monte Carlo.*

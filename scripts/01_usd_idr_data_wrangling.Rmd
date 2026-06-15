@@ -1,0 +1,445 @@
+---
+title: "Analisis Kurs USD/IDR — Bagian 1: Data Wrangling"
+author: "Data Analysis Project"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    theme: flatly
+    highlight: tango
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    number_sections: true
+    df_print: paged
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo      = TRUE,
+  message   = FALSE,
+  warning   = FALSE,
+  fig.align = "center"
+)
+```
+
+---
+
+> **Catatan Proyek:** Dokumen ini merupakan bagian pertama dari serangkaian analisis kurs USD/IDR menggunakan pendekatan *Geometric Brownian Motion* (GBM) dan simulasi Monte Carlo. Pada bagian ini, fokus diberikan sepenuhnya pada proses *data wrangling* — mulai dari pembacaan raw data hingga data siap analisis.
+
+---
+
+# Latar Belakang
+
+Nilai tukar USD/IDR merupakan salah satu indikator ekonomi yang sangat dinamis dan berpengaruh luas terhadap perekonomian Indonesia. Memahami pola pergerakannya secara historis adalah langkah pertama yang esensial sebelum membangun model prediktif.
+
+Data yang digunakan dalam analisis ini adalah data historis harian kurs USD/IDR dari **1 Januari 2021** hingga **31 Desember 2025**, bersumber dari [Investing.com](https://www.investing.com). Data mencakup 1.267 observasi dengan 7 variabel, namun analisis ini hanya memanfaatkan dua kolom utama: **Tanggal** (tanggal perdagangan) dan **Terakhir** (*closing price* harian).
+
+---
+
+# Persiapan: Memuat Paket
+
+Paket-paket berikut digunakan dalam tahap *data wrangling* ini:
+
+```{r load-packages}
+# Manajemen data
+library(dplyr)      # Manipulasi dataframe
+library(lubridate)  # Parsing dan manipulasi tanggal
+library(stringr)    # Manipulasi string
+
+# Tabel output
+library(knitr)      # Tabel output yang rapi
+library(kableExtra) # Styling tabel HTML
+```
+
+> **Instalasi:** Jalankan `install.packages(c("dplyr", "lubridate", "stringr", "knitr", "kableExtra"))` jika paket belum tersedia.
+
+---
+
+# Tahap 1 — Import Data
+
+## Membaca File CSV
+
+Data dibaca langsung dari file CSV hasil unduhan. Karena file menggunakan encoding UTF-8 dengan BOM (*Byte Order Mark*), parameter `fileEncoding` perlu disesuaikan.
+
+```{r import-data}
+df_raw <- read.csv(
+  "C:/Users/anjan/Documents/Downloads/usd-idr-portfolio-github/usd-idr-gbm-montecarlo/data/Data Historis USD_IDR.csv",
+  header        = TRUE,
+  stringsAsFactors = FALSE,
+  fileEncoding  = "UTF-8-BOM"   # Menangani BOM pada file CSV dari Investing.com
+)
+```
+
+## Inspeksi Awal
+
+```{r inspect-raw}
+# Dimensi data
+cat("Dimensi data:", nrow(df_raw), "baris x", ncol(df_raw), "kolom\n\n")
+
+# Nama kolom
+cat("Nama kolom:\n")
+print(names(df_raw))
+```
+
+```{r head-raw}
+# 6 baris pertama
+kable(head(df_raw, 6),
+      caption = "Tabel 1.1 — 6 Baris Pertama Data Mentah",
+      align   = "c") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE)
+```
+
+```{r tail-raw}
+# 6 baris terakhir
+kable(tail(df_raw, 6),
+      caption = "Tabel 1.2 — 6 Baris Terakhir Data Mentah",
+      align   = "c") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE)
+```
+
+```{r str-raw}
+# Tipe data setiap kolom
+str(df_raw)
+```
+
+### Temuan dari Inspeksi Awal {-}
+
+Berdasarkan inspeksi di atas, beberapa isu teridentifikasi:
+
+| # | Kolom | Isu | Penanganan |
+|---|-------|-----|------------|
+| 1 | `Terakhir` | Format angka Indonesia: titik = pemisah ribuan, koma = desimal (contoh: `"16.675,0"`) | Konversi string → numerik |
+| 2 | `Tanggal` | Format string `"DD/MM/YYYY"` | Konversi string → tipe `Date` |
+| 3 | `Vol.` | 766 nilai kosong | Diabaikan (kolom tidak dipakai) |
+| 4 | Urutan baris | Terbaru ke terlama (descending) | Dibalik menjadi ascending |
+
+---
+
+# Tahap 2 — Seleksi Kolom
+
+Dari 7 kolom yang tersedia, hanya dua yang relevan untuk analisis ini.
+
+```{r select-columns}
+df_selected <- df_raw %>%
+  select(Tanggal, Terakhir)
+
+cat("Kolom yang dipilih:", names(df_selected), "\n")
+cat("Jumlah baris:", nrow(df_selected), "\n")
+```
+
+```{r preview-selected}
+kable(head(df_selected, 8),
+      caption = "Tabel 2.1 — Data Setelah Seleksi Kolom",
+      align   = "c") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE)
+```
+
+---
+
+# Tahap 3 — Konversi Format Angka
+
+## Logika Konversi
+
+Kolom `Terakhir` menggunakan konvensi angka Indonesia:
+- **Titik (`.`)** → pemisah ribuan → harus **dihapus**
+- **Koma (`,`)** → pemisah desimal → harus **diganti titik (`.`)**
+
+Setelah itu, string dapat dikonversi ke tipe numerik dengan `as.numeric()`.
+
+```{r convert-numeric}
+df_numeric <- df_selected %>%
+  mutate(
+    # Langkah 1: Hapus titik sebagai pemisah ribuan
+    Terakhir_clean = str_remove_all(Terakhir, "\\."),
+    # Langkah 2: Ganti koma desimal dengan titik
+    Terakhir_clean = str_replace(Terakhir_clean, ",", "."),
+    # Langkah 3: Konversi ke numerik
+    Kurs = as.numeric(Terakhir_clean)
+  ) %>%
+  select(Tanggal, Kurs)
+```
+
+## Verifikasi Konversi
+
+```{r verify-numeric}
+# Cek apakah ada nilai NA yang tidak terduga setelah konversi
+na_count <- sum(is.na(df_numeric$Kurs))
+cat("Jumlah nilai NA pada kolom Kurs:", na_count, "\n")
+
+if (na_count == 0) {
+  cat("✓ Semua nilai berhasil dikonversi ke numerik tanpa NA.\n")
+} else {
+  cat("⚠ Terdapat", na_count, "nilai yang gagal dikonversi.\n")
+}
+```
+
+```{r preview-numeric}
+kable(head(df_numeric, 8),
+      caption = "Tabel 3.1 — Data Setelah Konversi Numerik",
+      align   = "c",
+      digits  = 1) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE)
+```
+
+---
+
+# Tahap 4 — Konversi Format Tanggal
+
+## Parsing Tanggal
+
+Kolom `Tanggal` bertipe karakter dengan format `"DD/MM/YYYY"`. Fungsi `dmy()` dari paket `lubridate` digunakan untuk mem-*parse* format ini secara langsung.
+
+```{r convert-date}
+df_dated <- df_numeric %>%
+  mutate(
+    Tanggal = dmy(Tanggal)   # dmy() = day-month-year parser dari lubridate
+  )
+```
+
+## Verifikasi Konversi Tanggal
+
+```{r verify-date}
+cat("Tipe kolom Tanggal:", class(df_dated$Tanggal), "\n")
+
+na_date <- sum(is.na(df_dated$Tanggal))
+cat("Jumlah NA pada kolom Tanggal:", na_date, "\n")
+
+if (na_date == 0) {
+  cat("✓ Semua tanggal berhasil dikonversi ke tipe Date.\n")
+}
+
+cat("\nRentang tanggal:\n")
+cat("  Dari  :", format(min(df_dated$Tanggal), "%d %B %Y"), "\n")
+cat("  Hingga:", format(max(df_dated$Tanggal), "%d %B %Y"), "\n")
+```
+
+```{r preview-dated}
+kable(head(df_dated, 8),
+      caption = "Tabel 4.1 — Data Setelah Konversi Tanggal",
+      align   = "c") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE)
+```
+
+---
+
+# Tahap 5 — Pengurutan Data (Ascending)
+
+Data awal diurutkan dari terbaru ke terlama (*descending*). Untuk analisis *time series*, data harus diurutkan kronologis dari terlama ke terbaru (*ascending*).
+
+```{r sort-ascending}
+df_sorted <- df_dated %>%
+  arrange(Tanggal)
+```
+
+## Verifikasi Urutan
+
+```{r verify-sort}
+cat("5 baris PERTAMA setelah diurutkan (seharusnya data terlama):\n")
+kable(head(df_sorted, 5),
+      align = "c") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE)
+```
+
+```{r verify-sort-tail}
+cat("5 baris TERAKHIR setelah diurutkan (seharusnya data terbaru):\n")
+kable(tail(df_sorted, 5),
+      align = "c") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE)
+```
+
+```{r verify-sort-check}
+# Konfirmasi urutan monoton naik
+is_sorted <- all(diff(as.numeric(df_sorted$Tanggal)) > 0)
+cat("✓ Data terurut secara kronologis (ascending):", is_sorted, "\n")
+```
+
+---
+
+# Tahap 6 — Dataset Final & Validasi
+
+## Penamaan Dataset Bersih
+
+```{r final-dataset}
+# Dataset bersih siap analisis
+df_usd_idr <- df_sorted
+
+cat("=== DATASET FINAL: df_usd_idr ===\n")
+cat("Dimensi    :", nrow(df_usd_idr), "baris x", ncol(df_usd_idr), "kolom\n")
+cat("Kolom      :", paste(names(df_usd_idr), collapse = ", "), "\n")
+cat("Tipe data  :", paste(sapply(df_usd_idr, class), collapse = ", "), "\n")
+cat("Periode    :", format(min(df_usd_idr$Tanggal), "%d %B %Y"),
+    "–", format(max(df_usd_idr$Tanggal), "%d %B %Y"), "\n")
+cat("Missing val:", sum(is.na(df_usd_idr)), "\n")
+```
+
+## Cek Duplikasi Tanggal
+
+```{r check-duplicates}
+dup_count <- sum(duplicated(df_usd_idr$Tanggal))
+cat("Jumlah tanggal duplikat:", dup_count, "\n")
+
+if (dup_count == 0) {
+  cat("✓ Tidak ada duplikasi tanggal. Setiap baris adalah hari perdagangan unik.\n")
+}
+```
+
+## Cek Rentang Nilai Kurs
+
+```{r check-range}
+cat("Nilai minimum kurs:", format(min(df_usd_idr$Kurs), big.mark = ".", decimal.mark = ","), "IDR\n")
+cat("Nilai maksimum kurs:", format(max(df_usd_idr$Kurs), big.mark = ".", decimal.mark = ","), "IDR\n")
+cat("Selisih min–max    :", format(max(df_usd_idr$Kurs) - min(df_usd_idr$Kurs),
+                                   big.mark = ".", decimal.mark = ","), "IDR\n")
+```
+
+## Ringkasan Statistik Komprehensif
+
+```{r base-summary}
+# Ringkasan statistik kolom Kurs menggunakan fungsi base R
+kurs_summary <- data.frame(
+  Statistik = c(
+    "Jumlah Observasi",
+    "Jumlah NA",
+    "Nilai Minimum",
+    "Kuartil 1 (Q1)",
+    "Median",
+    "Mean",
+    "Kuartil 3 (Q3)",
+    "Nilai Maksimum",
+    "Standar Deviasi",
+    "Rentang (Max - Min)"
+  ),
+  Nilai = c(
+    nrow(df_usd_idr),
+    sum(is.na(df_usd_idr$Kurs)),
+    round(min(df_usd_idr$Kurs), 1),
+    round(quantile(df_usd_idr$Kurs, 0.25), 1),
+    round(median(df_usd_idr$Kurs), 1),
+    round(mean(df_usd_idr$Kurs), 1),
+    round(quantile(df_usd_idr$Kurs, 0.75), 1),
+    round(max(df_usd_idr$Kurs), 1),
+    round(sd(df_usd_idr$Kurs), 1),
+    round(max(df_usd_idr$Kurs) - min(df_usd_idr$Kurs), 1)
+  )
+)
+
+kable(kurs_summary,
+      caption = "Tabel 6.1 — Ringkasan Statistik Kolom Kurs (IDR)",
+      align   = c("l", "r"),
+      col.names = c("Statistik", "Nilai (IDR)")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "bordered"),
+                full_width = FALSE) %>%
+  row_spec(c(3, 8), bold = TRUE, color = "#c0392b") %>%   # min & max
+  row_spec(6, bold = TRUE, color = "#2c7bb6")             # mean
+```
+
+## Tampilan Dataset Final
+
+```{r preview-final}
+kable(head(df_usd_idr, 10),
+      caption = "Tabel 6.1 — 10 Baris Pertama Dataset Final (df_usd_idr)",
+      align   = "c",
+      digits  = 1,
+      col.names = c("Tanggal", "Kurs Penutupan (IDR)")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "bordered"),
+                full_width = FALSE) %>%
+  column_spec(2, bold = TRUE, color = "#2c7bb6")
+```
+
+---
+
+# Ringkasan Tahapan Data Wrangling
+
+Tabel berikut merangkum seluruh transformasi yang dilakukan dalam proses *data wrangling* ini:
+
+```{r summary-table, echo=FALSE}
+summary_wrangling <- data.frame(
+  Tahap = c("1", "2", "3", "4", "5", "6"),
+  Aksi = c(
+    "Import data CSV",
+    "Seleksi kolom",
+    "Konversi tipe numerik",
+    "Konversi tipe tanggal",
+    "Pengurutan kronologis",
+    "Validasi dataset final"
+  ),
+  Input = c(
+    "File CSV mentah (7 kolom, 1.267 baris)",
+    "df_raw (7 kolom)",
+    "Kolom Terakhir: string format Indonesia",
+    "Kolom Tanggal: string 'DD/MM/YYYY'",
+    "Data urutan descending (terbaru ke terlama)",
+    "df_sorted"
+  ),
+  Output = c(
+    "df_raw (7 kolom, 1.267 baris)",
+    "df_selected (2 kolom: Tanggal, Terakhir)",
+    "Kolom Kurs: numerik (double)",
+    "Kolom Tanggal: tipe Date",
+    "df_sorted (urutan ascending / kronologis)",
+    "df_usd_idr — dataset bersih & siap analisis"
+  )
+)
+
+kable(summary_wrangling,
+      caption = "Tabel 7.1 — Ringkasan Proses Data Wrangling",
+      align   = c("c", "l", "l", "l")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "bordered"),
+                full_width = TRUE) %>%
+  column_spec(1, bold = TRUE, width = "3em") %>%
+  column_spec(2, bold = TRUE, color = "#2c7bb6") %>%
+  row_spec(6, background = "#e8f4f8", bold = TRUE)
+```
+
+---
+
+# Simpan Dataset Bersih
+
+Untuk keperluan tahap analisis berikutnya, dataset bersih disimpan sebagai file RDS (format biner R yang efisien) dan CSV.
+
+```{r save-data}
+# Simpan sebagai RDS (direkomendasikan untuk lanjutan analisis R)
+saveRDS(df_usd_idr, "df_usd_idr_clean.rds")
+
+# Simpan juga sebagai CSV (untuk keperluan dokumentasi / portabilitas)
+write.csv(df_usd_idr,
+          "df_usd_idr_clean.csv",
+          row.names = FALSE,
+          fileEncoding = "UTF-8")
+
+cat("✓ Dataset disimpan sebagai:\n")
+cat("  - df_usd_idr_clean.rds  (untuk analisis R selanjutnya)\n")
+cat("  - df_usd_idr_clean.csv  (untuk dokumentasi / ekspor)\n")
+```
+
+---
+
+# Langkah Selanjutnya
+
+Dataset `df_usd_idr` yang dihasilkan dari proses ini siap digunakan untuk tahapan analisis berikutnya:
+
+- **Bagian 2 — Statistik Deskriptif:** Menghitung mean, median, standar deviasi, dan statistik *log-return* harian ($r_t = \ln(S_t/S_{t-1})$).
+- **Bagian 3 — Visualisasi:** Plot *time series* kurs, histogram *log-return*, dan QQ-plot (dibangun dengan **R Shiny** untuk interaktivitas penuh).
+- **Bagian 4 — Uji Normalitas:** Kolmogorov-Smirnov test sebagai validasi asumsi GBM.
+- **Bagian 5 — Estimasi Parameter GBM & Simulasi Monte Carlo:** Estimasi $\mu$ (drift) dan $\sigma$ (volatilitas) serta simulasi 1.000, 5.000, dan 10.000 iterasi.
+
+---
+
+```{r session-info, collapse=TRUE}
+# Informasi sesi R untuk reprodusibilitas
+sessionInfo()
+```
+
+---
+
+*Dokumen ini dibuat dengan R Markdown dan dapat direproduksi sepenuhnya dengan menjalankan ulang seluruh chunk secara berurutan.*

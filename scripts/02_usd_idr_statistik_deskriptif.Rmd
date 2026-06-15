@@ -1,0 +1,457 @@
+---
+title: "Analisis Kurs USD/IDR — Bagian 2: Statistik Deskriptif"
+author: "Data Analysis Project"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    theme: flatly
+    highlight: tango
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    number_sections: true
+    df_print: paged
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo      = TRUE,
+  message   = FALSE,
+  warning   = FALSE,
+  fig.align = "center"
+)
+```
+
+---
+
+> **Catatan Proyek:** Dokumen ini merupakan bagian kedua dari serangkaian analisis kurs USD/IDR. Pada bagian ini, dilakukan perhitungan statistik deskriptif terhadap data kurs penutupan harian dan *log-return* harian sebagai fondasi sebelum masuk ke pemodelan *Geometric Brownian Motion* (GBM).
+
+---
+
+# Latar Belakang
+
+Sebelum membangun model prediktif, penting untuk memahami karakteristik statistik dari data yang akan dimodelkan. Pada tahap ini terdapat dua objek analisis utama:
+
+1. **Kurs penutupan harian** ($S_t$) — nilai tukar USD/IDR setiap hari perdagangan
+2. **Log-return harian** ($r_t$) — perubahan relatif kurs antar hari yang didefinisikan sebagai:
+
+$$r_t = \ln\left(\frac{S_t}{S_{t-1}}\right)$$
+
+*Log-return* dipilih karena memiliki sifat aditif secara waktu dan merupakan besaran yang langsung dimodelkan dalam kerangka GBM.
+
+---
+
+# Persiapan: Memuat Paket & Data
+
+## Memuat Paket
+
+```{r load-packages}
+# Manajemen data
+library(dplyr)      # Manipulasi dataframe
+library(lubridate)  # Fungsi tanggal
+
+# Statistik lanjutan
+library(moments)    # Skewness dan kurtosis
+
+# Tabel output
+library(knitr)      # Tabel output yang rapi
+library(kableExtra) # Styling tabel HTML
+```
+
+> **Instalasi:** Jalankan `install.packages(c("dplyr", "lubridate", "moments", "knitr", "kableExtra"))` jika paket belum tersedia.
+
+## Memuat Dataset Bersih
+
+Dataset yang digunakan adalah hasil output dari Bagian 1 (Data Wrangling), yaitu `df_usd_idr_clean.rds`.
+
+```{r load-data}
+# Muat dataset bersih dari Bagian 1
+df_usd_idr <- readRDS("df_usd_idr_clean.rds")
+
+# Konfirmasi data berhasil dimuat
+cat("Dataset berhasil dimuat.\n")
+cat("Dimensi  :", nrow(df_usd_idr), "baris x", ncol(df_usd_idr), "kolom\n")
+cat("Periode  :", format(min(df_usd_idr$Tanggal), "%d %B %Y"),
+    "–", format(max(df_usd_idr$Tanggal), "%d %B %Y"), "\n")
+cat("Tipe data:", paste(sapply(df_usd_idr, class), collapse = ", "), "\n")
+```
+
+---
+
+# Tahap 1 — Statistik Deskriptif Kurs Penutupan
+
+## Perhitungan Statistik
+
+```{r stats-kurs}
+# Hitung seluruh statistik deskriptif kurs penutupan
+n_obs      <- nrow(df_usd_idr)
+kurs_mean  <- mean(df_usd_idr$Kurs)
+kurs_med   <- median(df_usd_idr$Kurs)
+kurs_sd    <- sd(df_usd_idr$Kurs)
+kurs_min   <- min(df_usd_idr$Kurs)
+kurs_max   <- max(df_usd_idr$Kurs)
+kurs_q1    <- quantile(df_usd_idr$Kurs, 0.25)
+kurs_q3    <- quantile(df_usd_idr$Kurs, 0.75)
+kurs_iqr   <- IQR(df_usd_idr$Kurs)
+kurs_range <- kurs_max - kurs_min
+kurs_cv    <- (kurs_sd / kurs_mean) * 100   # Koefisien variasi (%)
+
+cat("Statistik deskriptif kurs penutupan berhasil dihitung.\n")
+```
+
+## Tabel Ringkasan
+
+```{r table-kurs}
+tabel_kurs <- data.frame(
+  Statistik = c(
+    "Jumlah Observasi (n)",
+    "Rata-rata (Mean)",
+    "Median",
+    "Standar Deviasi (SD)",
+    "Koefisien Variasi (CV)",
+    "Nilai Minimum",
+    "Kuartil 1 — Q1 (P25)",
+    "Kuartil 3 — Q3 (P75)",
+    "Rentang Interkuartil (IQR)",
+    "Rentang (Max − Min)",
+    "Nilai Maksimum"
+  ),
+  Nilai = c(
+    formatC(n_obs,      format = "d",  big.mark = "."),
+    formatC(kurs_mean,  format = "f", digits = 2, big.mark = ".", decimal.mark = ","),
+    formatC(kurs_med,   format = "f", digits = 2, big.mark = ".", decimal.mark = ","),
+    formatC(kurs_sd,    format = "f", digits = 2, big.mark = ".", decimal.mark = ","),
+    paste0(formatC(kurs_cv, format = "f", digits = 2, decimal.mark = ","), "%"),
+    formatC(kurs_min,   format = "f", digits = 1, big.mark = ".", decimal.mark = ","),
+    formatC(kurs_q1,    format = "f", digits = 1, big.mark = ".", decimal.mark = ","),
+    formatC(kurs_q3,    format = "f", digits = 1, big.mark = ".", decimal.mark = ","),
+    formatC(kurs_iqr,   format = "f", digits = 1, big.mark = ".", decimal.mark = ","),
+    formatC(kurs_range, format = "f", digits = 1, big.mark = ".", decimal.mark = ","),
+    formatC(kurs_max,   format = "f", digits = 1, big.mark = ".", decimal.mark = ",")
+  ),
+  Satuan = c(
+    "hari perdagangan",
+    "IDR", "IDR", "IDR", "—",
+    "IDR", "IDR", "IDR", "IDR", "IDR", "IDR"
+  )
+)
+
+kable(tabel_kurs,
+      caption = "Tabel 1.1 — Statistik Deskriptif Kurs Penutupan USD/IDR (2021–2025)",
+      align   = c("l", "r", "l")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "bordered"),
+                full_width = FALSE) %>%
+  row_spec(2, bold = TRUE, color = "#2c7bb6") %>%    # mean
+  row_spec(6, bold = TRUE, color = "#c0392b") %>%    # min
+  row_spec(11, bold = TRUE, color = "#c0392b") %>%   # max
+  pack_rows("Ukuran Pemusatan", 2, 3) %>%
+  pack_rows("Ukuran Penyebaran", 4, 10) %>%
+  pack_rows("Nilai Ekstrem", 11, 11)
+```
+
+## Interpretasi
+
+```{r interp-kurs, echo=FALSE}
+cat(sprintf(
+  "Selama periode 2021–2025, kurs USD/IDR rata-rata berada di Rp %s per USD,
+dengan median Rp %s. Standar deviasi sebesar Rp %s mencerminkan
+tingkat volatilitas absolut kurs selama periode tersebut.
+Koefisien variasi sebesar %.2f%% menunjukkan bahwa fluktuasi kurs
+relatif terhadap rata-ratanya tergolong %s.",
+  formatC(kurs_mean, format = "f", digits = 0, big.mark = "."),
+  formatC(kurs_med,  format = "f", digits = 0, big.mark = "."),
+  formatC(kurs_sd,   format = "f", digits = 0, big.mark = "."),
+  kurs_cv,
+  ifelse(kurs_cv < 5, "rendah (stabil)", ifelse(kurs_cv < 15, "sedang", "tinggi"))
+))
+```
+
+---
+
+# Tahap 2 — Perhitungan Log-Return Harian
+
+## Definisi dan Formula
+
+*Log-return* harian dihitung sebagai selisih logaritmik antara harga penutupan hari ini ($S_t$) dan hari sebelumnya ($S_{t-1}$):
+
+$$r_t = \ln(S_t) - \ln(S_{t-1}) = \ln\left(\frac{S_t}{S_{t-1}}\right)$$
+
+Karena membutuhkan data hari sebelumnya, baris pertama ($t=1$) akan menghasilkan `NA` dan dibuang, sehingga jumlah observasi *log-return* adalah $n - 1$.
+
+## Perhitungan
+
+```{r calc-return}
+df_return <- df_usd_idr %>%
+  mutate(
+    # Log-return: ln(S_t / S_{t-1})
+    # lag(Kurs) mengambil nilai Kurs dari baris sebelumnya
+    Log_Return = log(Kurs / lag(Kurs))
+  ) %>%
+  filter(!is.na(Log_Return))   # Buang baris pertama yang NA
+
+cat("Log-return berhasil dihitung.\n")
+cat("Jumlah observasi log-return:", nrow(df_return), "(n - 1 dari", nrow(df_usd_idr), ")\n")
+```
+
+## Preview Data dengan Log-Return
+
+```{r preview-return}
+kable(head(df_return, 8),
+      caption = "Tabel 2.1 — Data dengan Log-Return Harian (8 Baris Pertama)",
+      align   = c("c", "r", "r"),
+      digits  = 6,
+      col.names = c("Tanggal", "Kurs Penutupan (IDR)", "Log-Return (r_t)")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE) %>%
+  column_spec(3, bold = TRUE, color = "#2c7bb6")
+```
+
+---
+
+# Tahap 3 — Statistik Deskriptif Log-Return
+
+## Perhitungan Statistik Return
+
+```{r stats-return}
+rt         <- df_return$Log_Return
+
+# Statistik utama
+rt_n       <- length(rt)
+rt_mean    <- mean(rt)          # µ — drift harian
+rt_sd      <- sd(rt)            # σ — volatilitas harian
+rt_median  <- median(rt)
+rt_min     <- min(rt)
+rt_max     <- max(rt)
+rt_skew    <- skewness(rt)      # Kemiringan distribusi
+rt_kurt    <- kurtosis(rt)      # Keruncingan distribusi (excess kurtosis)
+rt_q1      <- quantile(rt, 0.25)
+rt_q3      <- quantile(rt, 0.75)
+
+# Annualized (disetahunkan) — asumsi 252 hari perdagangan per tahun
+rt_mean_annual <- rt_mean * 252
+rt_sd_annual   <- rt_sd * sqrt(252)
+
+cat("Statistik log-return berhasil dihitung.\n")
+cat(sprintf("µ (drift harian)       : %.8f\n", rt_mean))
+cat(sprintf("σ (volatilitas harian) : %.8f\n", rt_sd))
+cat(sprintf("µ (drift tahunan)      : %.6f  (%.4f%%)\n", rt_mean_annual, rt_mean_annual * 100))
+cat(sprintf("σ (volatilitas tahunan): %.6f  (%.4f%%)\n", rt_sd_annual,   rt_sd_annual   * 100))
+```
+
+## Tabel Ringkasan Return
+
+```{r table-return}
+tabel_return <- data.frame(
+  Statistik = c(
+    "Jumlah Observasi (n)",
+    "Mean Return Harian (µ)",
+    "Standar Deviasi Harian (σ)",
+    "Median Return",
+    "Skewness",
+    "Kurtosis (excess)",
+    "Nilai Minimum",
+    "Kuartil 1 — Q1",
+    "Kuartil 3 — Q3",
+    "Nilai Maksimum",
+    "µ Tahunan (× 252)",
+    "σ Tahunan (× √252)"
+  ),
+  Nilai = c(
+    formatC(rt_n,            format = "d"),
+    formatC(rt_mean,         format = "e", digits = 4),
+    formatC(rt_sd,           format = "f", digits = 6),
+    formatC(rt_median,       format = "e", digits = 4),
+    formatC(rt_skew,         format = "f", digits = 4),
+    formatC(rt_kurt,         format = "f", digits = 4),
+    formatC(rt_min,          format = "f", digits = 6),
+    formatC(rt_q1,           format = "f", digits = 6),
+    formatC(rt_q3,           format = "f", digits = 6),
+    formatC(rt_max,          format = "f", digits = 6),
+    paste0(formatC(rt_mean_annual * 100, format = "f", digits = 4), "%"),
+    paste0(formatC(rt_sd_annual   * 100, format = "f", digits = 4), "%")
+  ),
+  Keterangan = c(
+    "Hari perdagangan aktif",
+    "Parameter drift GBM",
+    "Parameter volatilitas GBM",
+    "Titik tengah distribusi",
+    "< 0: ekor kiri lebih panjang",
+    "> 3: lebih runcing dari normal",
+    "Return negatif terbesar",
+    "25% data di bawah nilai ini",
+    "75% data di bawah nilai ini",
+    "Return positif terbesar",
+    "Drift disetahunkan",
+    "Volatilitas disetahunkan"
+  )
+)
+
+kable(tabel_return,
+      caption = "Tabel 3.1 — Statistik Deskriptif Log-Return Harian USD/IDR",
+      align   = c("l", "r", "l")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "bordered"),
+                full_width = TRUE) %>%
+  row_spec(2, bold = TRUE, background = "#eaf4fb") %>%   # mean / µ
+  row_spec(3, bold = TRUE, background = "#eaf4fb") %>%   # sd / σ
+  row_spec(5, bold = TRUE, color = "#8e44ad") %>%        # skewness
+  row_spec(6, bold = TRUE, color = "#8e44ad") %>%        # kurtosis
+  row_spec(11:12, bold = TRUE, background = "#fef9e7") %>%  # annualized
+  pack_rows("Statistik Harian", 1, 10) %>%
+  pack_rows("Parameter GBM Disetahunkan", 11, 12)
+```
+
+---
+
+# Tahap 4 — Interpretasi Statistik Return
+
+## Analisis Skewness dan Kurtosis
+
+```{r interp-return, echo=FALSE}
+# Interpretasi otomatis berdasarkan nilai
+interp_skew <- if (abs(rt_skew) < 0.5) {
+  "mendekati simetris (|skewness| < 0,5)"
+} else if (rt_skew < 0) {
+  "condong ke kiri / negatif — terdapat peristiwa penurunan kurs yang ekstrem"
+} else {
+  "condong ke kanan / positif — terdapat peristiwa kenaikan kurs yang ekstrem"
+}
+
+interp_kurt <- if (rt_kurt > 3) {
+  sprintf("leptokurtik (kurtosis = %.4f > 3) — distribusi lebih runcing dari normal,
+    artinya return ekstrem (ekor tebal) lebih sering terjadi dari yang diprediksi
+    distribusi normal. Ini adalah ciri khas data keuangan.", rt_kurt)
+} else if (rt_kurt < 3) {
+  sprintf("platikurtik (kurtosis = %.4f < 3) — distribusi lebih datar dari normal.", rt_kurt)
+} else {
+  "mesokurtik — mendekati distribusi normal."
+}
+
+cat("=== INTERPRETASI SKEWNESS ===\n")
+cat(sprintf("Nilai skewness = %.4f → distribusi return %s.\n\n", rt_skew, interp_skew))
+
+cat("=== INTERPRETASI KURTOSIS ===\n")
+cat(sprintf("Nilai kurtosis = %.4f → distribusi return bersifat %s\n", rt_kurt, interp_kurt))
+```
+
+## Implikasi terhadap Asumsi GBM
+
+```{r gbm-implication, echo=FALSE}
+cat("=== IMPLIKASI TERHADAP ASUMSI GBM ===\n\n")
+
+cat("GBM mengasumsikan bahwa log-return mengikuti distribusi normal.\n")
+cat("Berdasarkan statistik deskriptif di atas:\n\n")
+
+cat(sprintf("  • Skewness = %.4f → ", rt_skew))
+if (abs(rt_skew) < 0.5) {
+  cat("Asumsi simetri terpenuhi dengan baik.\n")
+} else {
+  cat("Terdapat asimetri yang perlu diverifikasi lebih lanjut di uji normalitas.\n")
+}
+
+cat(sprintf("  • Kurtosis = %.4f → ", rt_kurt))
+if (rt_kurt > 3) {
+  cat("Ekor distribusi lebih tebal dari normal (excess kurtosis > 0).\n")
+  cat("    Ini umum pada data keuangan dan menjadi catatan penting\n")
+  cat("    dalam interpretasi hasil simulasi Monte Carlo.\n")
+} else {
+  cat("Distribusi mendekati normal.\n")
+}
+
+cat("\nKesimpulan awal ini akan diverifikasi secara formal\n")
+cat("pada Bagian 3 menggunakan uji Kolmogorov-Smirnov.\n")
+```
+
+---
+
+# Tahap 5 — Simpan Parameter untuk GBM
+
+Parameter $\mu$ dan $\sigma$ yang dihitung di bagian ini akan digunakan langsung pada tahap estimasi GBM dan simulasi Monte Carlo.
+
+```{r save-params}
+# Simpan parameter GBM dan dataset return ke file RDS
+params_gbm <- list(
+  mu_harian      = rt_mean,
+  sigma_harian   = rt_sd,
+  mu_tahunan     = rt_mean_annual,
+  sigma_tahunan  = rt_sd_annual,
+  n_return       = rt_n,
+  periode_awal   = min(df_return$Tanggal),
+  periode_akhir  = max(df_return$Tanggal),
+  kurs_terakhir  = tail(df_usd_idr$Kurs, 1)   # S_0 untuk simulasi
+)
+
+# Simpan parameter
+saveRDS(params_gbm,  "params_gbm.rds")
+
+# Simpan dataframe return (dipakai di visualisasi & uji normalitas)
+saveRDS(df_return,   "df_return.rds")
+
+cat("✓ File yang disimpan:\n")
+cat("  - params_gbm.rds  → parameter µ dan σ untuk GBM\n")
+cat("  - df_return.rds   → dataframe lengkap dengan kolom Log_Return\n\n")
+
+cat("=== RINGKASAN PARAMETER GBM ===\n")
+cat(sprintf("  S₀  (kurs terakhir)    : Rp %s\n",
+    formatC(params_gbm$kurs_terakhir, format = "f", digits = 1, big.mark = ".")))
+cat(sprintf("  µ   (drift harian)     : %.8f\n",  params_gbm$mu_harian))
+cat(sprintf("  σ   (volatilitas har.) : %.8f\n",  params_gbm$sigma_harian))
+cat(sprintf("  µ   (drift tahunan)    : %.6f\n",  params_gbm$mu_tahunan))
+cat(sprintf("  σ   (volatilitas thn.) : %.6f\n",  params_gbm$sigma_tahunan))
+```
+
+---
+
+# Ringkasan Tahap 2
+
+```{r ringkasan-tab2, echo=FALSE}
+ringkasan <- data.frame(
+  Sub_Tahap = c("2.1", "2.2", "2.3", "2.4", "2.5"),
+  Aktivitas = c(
+    "Statistik deskriptif kurs penutupan",
+    "Perhitungan log-return harian",
+    "Statistik deskriptif log-return",
+    "Interpretasi skewness & kurtosis",
+    "Simpan parameter GBM"
+  ),
+  Output_Utama = c(
+    "Mean, median, SD, CV, Q1, Q3",
+    "Kolom Log_Return pada df_return",
+    "µ, σ, skewness, kurtosis, annualized",
+    "Konfirmasi/catatan asumsi normalitas GBM",
+    "params_gbm.rds, df_return.rds"
+  )
+)
+
+kable(ringkasan,
+      caption = "Tabel 5.1 — Ringkasan Aktivitas Bagian 2",
+      align   = c("c", "l", "l"),
+      col.names = c("Sub-Tahap", "Aktivitas", "Output Utama")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "bordered"),
+                full_width = TRUE) %>%
+  column_spec(1, bold = TRUE, width = "5em") %>%
+  column_spec(2, bold = TRUE, color = "#2c7bb6") %>%
+  row_spec(5, background = "#eafaf1", bold = TRUE)
+```
+
+---
+
+# Langkah Selanjutnya
+
+Dengan parameter $\mu$ dan $\sigma$ yang sudah tersimpan, analisis berlanjut ke:
+
+- **Bagian 3 — Visualisasi (R Shiny):** Plot *time series* kurs, histogram distribusi *log-return* dengan kurva normal overlay, dan QQ-plot.
+- **Bagian 4 — Uji Normalitas:** Kolmogorov-Smirnov test untuk memvalidasi asumsi GBM secara formal.
+- **Bagian 5 — Estimasi Parameter & Simulasi Monte Carlo:** Menggunakan $\mu$ dan $\sigma$ dari bagian ini untuk mensimulasikan lintasan kurs ke depan.
+
+---
+
+```{r session-info, collapse=TRUE}
+sessionInfo()
+```
+
+---
+
+*Dokumen ini merupakan bagian dari seri analisis kurs USD/IDR menggunakan pendekatan Geometric Brownian Motion dan Simulasi Monte Carlo.*

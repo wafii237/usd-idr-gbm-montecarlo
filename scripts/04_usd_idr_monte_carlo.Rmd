@@ -1,0 +1,438 @@
+---
+title: "Analisis Kurs USD/IDR — Bagian 5 & 6: Estimasi GBM & Simulasi Monte Carlo"
+author: "Data Analysis Project"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    theme: flatly
+    highlight: tango
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    number_sections: true
+    df_print: paged
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo      = TRUE,
+  message   = FALSE,
+  warning   = FALSE,
+  fig.align = "center",
+  fig.width = 10,
+  fig.height = 6
+)
+setwd("D:/PROJECT PSS")
+```
+
+---
+
+> **Catatan Proyek:** Dokumen ini merupakan bagian kelima dan keenam dari seri analisis kurs USD/IDR. Pada bagian ini dilakukan estimasi parameter model *Geometric Brownian Motion* (GBM) dan simulasi Monte Carlo dengan tiga skenario iterasi: 1.000, 5.000, dan 10.000 lintasan simulasi.
+
+---
+
+# Latar Belakang
+
+Model GBM mendefinisikan dinamika harga aset $S_t$ sebagai proses stokastik:
+
+$$dS_t = \mu S_t \, dt + \sigma S_t \, dW_t$$
+
+di mana $W_t$ adalah proses Wiener standar. Dalam bentuk diskrit yang digunakan untuk simulasi:
+
+$$S_{t+\Delta t} = S_t \cdot \exp\left[\left(\mu - \frac{\sigma^2}{2}\right)\Delta t + \sigma\sqrt{\Delta t}\, Z_t\right], \quad Z_t \sim \mathcal{N}(0,1)$$
+
+Parameter $\mu$ (drift) dan $\sigma$ (volatilitas) diestimasi langsung dari data historis *log-return* harian.
+
+---
+
+# Persiapan: Memuat Paket & Data
+
+## Memuat Paket
+
+```{r load-packages}
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(knitr)
+library(kableExtra)
+
+set.seed(42)  # Untuk reprodusibilitas simulasi
+```
+
+## Memuat & Menyiapkan Data
+
+```{r load-data}
+# Baca langsung dari CSV
+df_raw <- read.csv(
+  "Data Historis USD_IDR.csv",
+  header           = TRUE,
+  stringsAsFactors = FALSE,
+  fileEncoding     = "UTF-8-BOM"
+)
+
+# Wrangling
+df_usd_idr <- df_raw %>%
+  select(Tanggal, Terakhir) %>%
+  mutate(
+    Kurs    = as.numeric(gsub(",", ".", gsub("\\.", "", Terakhir))),
+    Tanggal = as.Date(Tanggal, format = "%d/%m/%Y")
+  ) %>%
+  select(Tanggal, Kurs) %>%
+  arrange(Tanggal)
+
+# Hitung log-return
+df_return <- df_usd_idr %>%
+  mutate(Log_Return = log(Kurs / lag(Kurs))) %>%
+  filter(!is.na(Log_Return))
+
+cat("Data berhasil dimuat.\n")
+cat("Observasi kurs   :", nrow(df_usd_idr), "\n")
+cat("Observasi return :", nrow(df_return), "\n")
+cat("Periode          :", format(min(df_usd_idr$Tanggal), "%d %B %Y"),
+    "–", format(max(df_usd_idr$Tanggal), "%d %B %Y"), "\n")
+```
+
+---
+
+# Bagian 5 — Estimasi Parameter GBM
+
+## Estimasi µ dan σ
+
+Parameter GBM diestimasi dari statistik *log-return* harian:
+
+- **Drift harian** ($\hat{\mu}$): rata-rata *log-return* harian
+- **Volatilitas harian** ($\hat{\sigma}$): standar deviasi *log-return* harian
+
+```{r estimate-params}
+rt    <- df_return$Log_Return
+n_ret <- length(rt)
+
+# Parameter harian
+mu_hat    <- mean(rt)
+sigma_hat <- sd(rt)
+
+# Parameter disetahunkan (asumsi 252 hari perdagangan)
+mu_annual    <- mu_hat * 252
+sigma_annual <- sigma_hat * sqrt(252)
+
+# Kurs awal simulasi (S0) = kurs penutupan terakhir
+S0 <- tail(df_usd_idr$Kurs, 1)
+T_akhir <- as.Date("2025-12-31")
+T0      <- max(df_usd_idr$Tanggal)
+
+cat("=== PARAMETER GBM YANG DIESTIMASI ===\n\n")
+cat(sprintf("S₀  (kurs terakhir)    : Rp %s per USD\n",
+    formatC(S0, format = "f", digits = 1, big.mark = ".")))
+cat(sprintf("µ   (drift harian)     : %.8f\n",   mu_hat))
+cat(sprintf("σ   (volatilitas har.) : %.8f\n",   sigma_hat))
+cat(sprintf("µ   (drift tahunan)    : %.6f  (%.4f%%)\n",
+    mu_annual, mu_annual * 100))
+cat(sprintf("σ   (volatilitas thn.) : %.6f  (%.4f%%)\n",
+    sigma_annual, sigma_annual * 100))
+cat(sprintf("n   (obs. return)      : %d hari perdagangan\n", n_ret))
+```
+
+## Tabel Parameter
+
+```{r params-table}
+tbl_params <- data.frame(
+  Parameter = c(
+    "S₀ — Kurs Awal Simulasi",
+    "µ — Drift Harian",
+    "σ — Volatilitas Harian",
+    "µ — Drift Tahunan (× 252)",
+    "σ — Volatilitas Tahunan (× √252)",
+    "n — Jumlah Observasi Return",
+    "Δt — Time Step"
+  ),
+  Nilai = c(
+    formatC(S0, format = "f", digits = 1, big.mark = "."),
+    formatC(mu_hat,       format = "e", digits = 5),
+    formatC(sigma_hat,    format = "f", digits = 8),
+    paste0(formatC(mu_annual    * 100, format = "f", digits = 4), "%"),
+    paste0(formatC(sigma_annual * 100, format = "f", digits = 4), "%"),
+    formatC(n_ret, format = "d"),
+    "1 hari perdagangan"
+  ),
+  Keterangan = c(
+    "Kurs penutupan terakhir (31 Des 2025)",
+    "Rata-rata log-return — parameter drift GBM",
+    "Std. deviasi log-return — parameter volatilitas GBM",
+    "Drift disetahunkan untuk referensi",
+    "Volatilitas disetahunkan untuk referensi",
+    "Jumlah data historis yang digunakan",
+    "Satu langkah = satu hari perdagangan"
+  )
+)
+
+kable(tbl_params,
+      caption = "Tabel 5.1 — Parameter GBM yang Diestimasi dari Data Historis",
+      align   = c("l", "r", "l")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "bordered"),
+                full_width = TRUE) %>%
+  row_spec(1, bold = TRUE, background = "#eaf4fb") %>%
+  row_spec(2:3, bold = TRUE, color = "#2c7bb6") %>%
+  pack_rows("Parameter Harian (digunakan dalam simulasi)", 1, 3) %>%
+  pack_rows("Parameter Tahunan (referensi)", 4, 5) %>%
+  pack_rows("Informasi Tambahan", 6, 7)
+```
+
+## Horizon Simulasi
+
+```{r horizon}
+# Tentukan horizon simulasi
+# Simulasi ke depan dari kurs terakhir
+horizon_hari <- 252   # 1 tahun perdagangan ke depan
+dt           <- 1     # time step = 1 hari
+
+cat("=== HORIZON SIMULASI ===\n")
+cat(sprintf("Titik awal (S₀) : %s\n", format(T0, "%d %B %Y")))
+cat(sprintf("Horizon         : %d hari perdagangan (~1 tahun)\n", horizon_hari))
+cat(sprintf("Time step (Δt)  : %d hari\n", dt))
+```
+
+---
+
+# Bagian 6 — Simulasi Monte Carlo
+
+## Fungsi Simulasi GBM
+
+```{r gbm-function}
+# Fungsi simulasi GBM diskrit
+# Output: matrix (horizon+1) x n_sim — baris = waktu, kolom = satu lintasan
+simulasi_gbm <- function(S0, mu, sigma, dt, horizon, n_sim) {
+
+  # Inisialisasi matrix hasil
+  # Baris 1 = S0, baris 2 s.d. horizon+1 = hasil simulasi
+  S_matrix <- matrix(NA, nrow = horizon + 1, ncol = n_sim)
+  S_matrix[1, ] <- S0
+
+  # Loop simulasi
+  for (t in 2:(horizon + 1)) {
+    Z <- rnorm(n_sim)   # n_sim bilangan acak N(0,1)
+    S_matrix[t, ] <- S_matrix[t - 1, ] *
+      exp((mu - 0.5 * sigma^2) * dt + sigma * sqrt(dt) * Z)
+  }
+
+  return(S_matrix)
+}
+
+cat("Fungsi simulasi GBM berhasil didefinisikan.\n")
+cat("Formula: S(t+dt) = S(t) × exp[(µ - σ²/2)dt + σ√dt × Z]\n")
+cat("         Z ~ N(0,1)\n")
+```
+
+## Skenario 1: 1.000 Iterasi
+
+```{r sim-1000}
+cat("Menjalankan simulasi 1.000 iterasi...\n")
+t_start <- proc.time()
+
+sim_1000 <- simulasi_gbm(
+  S0      = S0,
+  mu      = mu_hat,
+  sigma   = sigma_hat,
+  dt      = 1,
+  horizon = horizon_hari,
+  n_sim   = 1000
+)
+
+t_1000 <- proc.time() - t_start
+cat(sprintf("✓ Selesai dalam %.3f detik.\n", t_1000["elapsed"]))
+cat(sprintf("Dimensi matrix : %d baris × %d kolom\n",
+    nrow(sim_1000), ncol(sim_1000)))
+cat(sprintf("Kurs akhir rata-rata  : Rp %s\n",
+    formatC(mean(sim_1000[nrow(sim_1000), ]),
+            format = "f", digits = 0, big.mark = ".")))
+```
+
+## Skenario 2: 5.000 Iterasi
+
+```{r sim-5000}
+cat("Menjalankan simulasi 5.000 iterasi...\n")
+t_start <- proc.time()
+
+sim_5000 <- simulasi_gbm(
+  S0      = S0,
+  mu      = mu_hat,
+  sigma   = sigma_hat,
+  dt      = 1,
+  horizon = horizon_hari,
+  n_sim   = 5000
+)
+
+t_5000 <- proc.time() - t_start
+cat(sprintf("✓ Selesai dalam %.3f detik.\n", t_5000["elapsed"]))
+cat(sprintf("Kurs akhir rata-rata  : Rp %s\n",
+    formatC(mean(sim_5000[nrow(sim_5000), ]),
+            format = "f", digits = 0, big.mark = ".")))
+```
+
+## Skenario 3: 10.000 Iterasi
+
+```{r sim-10000}
+cat("Menjalankan simulasi 10.000 iterasi...\n")
+t_start <- proc.time()
+
+sim_10000 <- simulasi_gbm(
+  S0      = S0,
+  mu      = mu_hat,
+  sigma   = sigma_hat,
+  dt      = 1,
+  horizon = horizon_hari,
+  n_sim   = 10000
+)
+
+t_10000 <- proc.time() - t_start
+cat(sprintf("✓ Selesai dalam %.3f detik.\n", t_10000["elapsed"]))
+cat(sprintf("Kurs akhir rata-rata  : Rp %s\n",
+    formatC(mean(sim_10000[nrow(sim_10000), ]),
+            format = "f", digits = 0, big.mark = ".")))
+```
+
+## Tabel Perbandingan Waktu Komputasi
+
+```{r compute-table}
+tbl_compute <- data.frame(
+  Skenario   = c("Skenario 1", "Skenario 2", "Skenario 3"),
+  Iterasi    = c("1.000", "5.000", "10.000"),
+  Waktu_detik = c(
+    round(t_1000["elapsed"],  3),
+    round(t_5000["elapsed"],  3),
+    round(t_10000["elapsed"], 3)
+  ),
+  Mean_Akhir = c(
+    formatC(mean(sim_1000[nrow(sim_1000),  ]), format="f", digits=0, big.mark="."),
+    formatC(mean(sim_5000[nrow(sim_5000),  ]), format="f", digits=0, big.mark="."),
+    formatC(mean(sim_10000[nrow(sim_10000),]), format="f", digits=0, big.mark=".")
+  ),
+  SD_Akhir = c(
+    formatC(sd(sim_1000[nrow(sim_1000),  ]), format="f", digits=0, big.mark="."),
+    formatC(sd(sim_5000[nrow(sim_5000),  ]), format="f", digits=0, big.mark="."),
+    formatC(sd(sim_10000[nrow(sim_10000),]), format="f", digits=0, big.mark=".")
+  )
+)
+
+kable(tbl_compute,
+      caption = "Tabel 6.1 — Perbandingan Tiga Skenario Simulasi Monte Carlo",
+      align   = c("l","r","r","r","r"),
+      col.names = c("Skenario", "Iterasi",
+                    "Waktu (detik)", "Mean Kurs Akhir (IDR)", "SD Kurs Akhir (IDR)")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "bordered"),
+                full_width = TRUE) %>%
+  column_spec(2, bold = TRUE) %>%
+  column_spec(4, bold = TRUE, color = "#2c7bb6") %>%
+  row_spec(3, background = "#eafaf1", bold = TRUE)
+```
+
+## Simpan Hasil Simulasi
+
+```{r save-sim}
+# Simpan semua hasil simulasi ke RDS
+saveRDS(list(
+  sim_1000  = sim_1000,
+  sim_5000  = sim_5000,
+  sim_10000 = sim_10000,
+  S0        = S0,
+  mu        = mu_hat,
+  sigma     = sigma_hat,
+  horizon   = horizon_hari,
+  tanggal_S0 = T0
+), "hasil_simulasi.rds")
+
+cat("✓ Hasil simulasi disimpan ke: hasil_simulasi.rds\n")
+cat("  Berisi: sim_1000, sim_5000, sim_10000, S0, mu, sigma, horizon\n")
+```
+
+---
+
+# Ringkasan Bagian 5 & 6
+
+```{r ringkasan, echo=FALSE}
+ringkasan <- data.frame(
+  Bagian = c("5.1","5.2","5.3","6.1","6.2","6.3","6.4"),
+  Aktivitas = c(
+    "Estimasi µ dan σ dari log-return historis",
+    "Tabel parameter GBM lengkap",
+    "Penentuan horizon simulasi (252 hari)",
+    "Definisi fungsi simulasi GBM diskrit",
+    "Simulasi 1.000 iterasi",
+    "Simulasi 5.000 iterasi",
+    "Simulasi 10.000 iterasi"
+  ),
+  Output = c(
+    "mu_hat, sigma_hat",
+    "Tabel 5.1",
+    "horizon = 252 hari, dt = 1",
+    "Fungsi simulasi_gbm()",
+    "Matrix sim_1000 (253 × 1.000)",
+    "Matrix sim_5000 (253 × 5.000)",
+    "Matrix sim_10000 (253 × 10.000)"
+  )
+)
+
+kable(ringkasan,
+      caption = "Tabel Ringkasan Bagian 5 & 6",
+      align   = c("c","l","l"),
+      col.names = c("Sub-Bagian","Aktivitas","Output")) %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed","bordered"),
+                full_width = TRUE) %>%
+  column_spec(1, bold = TRUE, width = "5em") %>%
+  column_spec(2, bold = TRUE, color = "#2c7bb6") %>%
+  pack_rows("Bagian 5 — Estimasi Parameter GBM", 1, 3) %>%
+  pack_rows("Bagian 6 — Simulasi Monte Carlo", 4, 7) %>%
+  row_spec(7, background = "#eafaf1", bold = TRUE)
+```
+
+
+
+```{r tabel-parameter-gbm, echo=TRUE}
+library(knitr)
+library(kableExtra)
+
+# Membuat dataframe parameter berdasarkan output kalkulasi data aktual
+df_param_gbm <- data.frame(
+  Parameter = c("Kurs Awal Aktual", "Tren Pertumbuhan (Drift)", "Fluktuasi Acak (Volatilitas)", "Horizon Waktu Proyeksi"),
+  Notasi = c("S0", "μ (mu)", "σ (sigma)", "T"),
+  Nilai_Harian = c("Rp 16.420,00", "0,000129", "0,003667", "252 Hari Kerja"),
+  Nilai_Tahunan = c("-", "0,032506 (3,25%)", "0,058209 (5,82%)", "1 Tahun Kalender")
+)
+
+# Membuat visualisasi tabel profesional dengan kableExtra
+df_param_gbm %>%
+  kable(
+    col.names = c("Nama Parameter", "Notasi Matematis", "Skala Harian", "Skala Tahunan (Annualized)"),
+    align = c("l", "c", "r", "r"),
+    caption = "Tabel 3.3: Parameter Model Stokastik Geometric Brownian Motion (GBM)"
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    full_width = FALSE,
+    position = "center"
+  ) %>%
+  row_spec(0, bold = TRUE, color = "white", background = "#00b4d8") %>% # Warna Cyan/Biru Portofolio
+  column_spec(1, bold = TRUE) %>%
+  column_spec(2, italic = TRUE)
+
+# Langkah Selanjutnya
+
+Hasil ketiga skenario simulasi dianalisis secara mendalam pada **Bagian 7**, mencakup:
+
+- **Fan chart** seluruh lintasan simulasi per skenario
+- **Histogram distribusi** kurs akhir (hari ke-252)
+- **Interval kepercayaan 90%** — persentil ke-5 dan ke-95
+- **Perbandingan stabilitas** hasil antar ketiga skenario
+- **Nilai ekspektasi** kurs USD/IDR satu tahun ke depan
+
+```
+
+```{r session-info, collapse=TRUE}
+sessionInfo()
+```
+
+---
+
+*Dokumen ini merupakan bagian dari seri analisis kurs USD/IDR menggunakan pendekatan Geometric Brownian Motion dan Simulasi Monte Carlo.*
